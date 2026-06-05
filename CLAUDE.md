@@ -5,6 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Repository rules
 
 - **Keep all commits and PRs clean of AI attribution.** Never add Claude (or any AI) as a co-author, and never append a `Co-Authored-By: Claude ...` trailer or any "Generated with Claude Code" line. This applies to commit messages, PR titles, and PR bodies alike.
+- **Use [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) for every commit message and PR title.** Format: `<type>[optional scope]: <description>`, lower-case description, no trailing period. Common types: `feat`, `fix`, `refactor`, `docs`, `chore`, `test`, `build`, `ci`, `perf`. Breaking changes use a `!` (e.g. `feat!:`) or a `BREAKING CHANGE:` footer.
 
 ## What this is
 

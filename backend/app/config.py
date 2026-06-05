@@ -1,9 +1,15 @@
 """Configuration loaded from environment variables."""
 
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 
+# Load the shared project-root .env first (one file configures the whole
+# project), then a backend-local .env if present. Neither overrides variables
+# already set in the real environment (e.g. those provided by Docker Compose).
+_ROOT_ENV = Path(__file__).resolve().parents[2] / ".env"
+load_dotenv(_ROOT_ENV)
 load_dotenv()
 
 # OpenAI-compatible endpoint settings (the only place these defaults live).

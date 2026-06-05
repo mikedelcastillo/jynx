@@ -60,6 +60,14 @@ The LLM endpoint is **external and configurable** — Jynx bundles no LLM server
 
 You need **Node 24+**, **Python 3.12+**, and a reachable **OpenAI-compatible endpoint** (e.g. Ollama, or Olla load-balancing Ollama, exposing the OpenAI API at `http://localhost:40114/v1`). Docker is optional.
 
+### Configure once (single root env file)
+
+One `.env` at the repo root configures everything — Docker Compose, the backend, and the frontend all read it:
+
+```bash
+cp .env.example .env             # then edit OPENAI_* / NEXT_PUBLIC_API_BASE_URL as needed
+```
+
 ### Run with Docker (one command)
 
 ```bash
@@ -70,12 +78,13 @@ Frontend → http://localhost:3000 · Backend → http://localhost:8000. To reac
 
 ### Run locally (two terminals)
 
+Both services read the root `.env` you created above — no per-service env files needed.
+
 **Backend**
 ```bash
 cd backend
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env            # then edit as needed
 uvicorn app.main:app --reload --port 8000
 ```
 
@@ -83,7 +92,6 @@ uvicorn app.main:app --reload --port 8000
 ```bash
 cd frontend
 npm install
-cp .env.example .env.local      # then edit as needed
 npm run dev                     # open http://localhost:3000
 ```
 
@@ -119,19 +127,18 @@ It verifies the LLM output parses, validates against the schema, has a non-empty
 
 ```
 jynx/
+├── .env.example            # Single root env file (Compose + backend + frontend)
 ├── backend/                # FastAPI service (:8000)
 │   ├── app/                # main, config, models, fetching, extraction, chunking, llm, pipeline, events
 │   ├── scripts/            # eval.py
 │   ├── Dockerfile
-│   ├── requirements.txt
-│   └── .env.example
+│   └── requirements.txt
 ├── frontend/               # Next.js App Router app (:3000)
 │   ├── app/                # layout, page (input/loading/result states), styles
 │   ├── components/         # UrlInput, LogConsole, Quiz, RawJsonPanel
 │   ├── lib/                # NDJSON streaming client + shared types
 │   ├── Dockerfile
-│   ├── package.json
-│   └── .env.example
+│   └── package.json
 ├── docker-compose.yml      # Two-service stack (frontend + backend)
 ├── PLAN.md                 # Architecture & design notes
 └── README.md
