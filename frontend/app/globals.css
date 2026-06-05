@@ -1,0 +1,337 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial,
+    sans-serif;
+  background: #f7f7f8;
+  color: #1a1a1a;
+  line-height: 1.5;
+}
+
+.container {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 2rem 1.25rem 4rem;
+}
+
+.title {
+  margin: 0 0 0.25rem;
+  font-size: 2rem;
+  font-weight: 700;
+}
+
+.subtitle {
+  margin: 0 0 1.5rem;
+  color: #555;
+}
+
+.field-label {
+  display: block;
+  margin: 1rem 0 0.4rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #444;
+}
+
+/* ---------- inputs ---------- */
+.url-input input,
+.text-area {
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid #d0d0d5;
+  border-radius: 6px;
+  font-size: 0.95rem;
+  font-family: inherit;
+  background: #fff;
+}
+
+.url-input input:focus,
+.text-area:focus {
+  outline: none;
+  border-color: #6b6bff;
+}
+
+.text-area {
+  resize: vertical;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: #ececff;
+  color: #2d2da8;
+  border-radius: 999px;
+  padding: 0.25rem 0.5rem 0.25rem 0.75rem;
+  font-size: 0.8rem;
+  max-width: 100%;
+}
+
+.chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 24rem;
+}
+
+.chip-remove {
+  border: none;
+  background: transparent;
+  color: #2d2da8;
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0;
+}
+
+/* ---------- buttons ---------- */
+button {
+  font-family: inherit;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.primary-btn {
+  margin-top: 1.5rem;
+  padding: 0.65rem 1.4rem;
+  background: #4b4bff;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-weight: 600;
+}
+
+.primary-btn:disabled {
+  background: #b9b9c7;
+  cursor: not-allowed;
+}
+
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.button-row button {
+  padding: 0.5rem 1rem;
+  background: #fff;
+  border: 1px solid #d0d0d5;
+  border-radius: 6px;
+}
+
+.button-row button:hover {
+  background: #f0f0f5;
+}
+
+/* ---------- log console ---------- */
+.log-console {
+  height: 320px;
+  overflow-y: auto;
+  background: #14161c;
+  color: #d6d6d6;
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  margin: 1rem 0;
+}
+
+.log-empty {
+  color: #777;
+}
+
+.log-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 1px 0;
+}
+
+.log-level {
+  font-weight: 700;
+}
+
+.log-data {
+  color: #9aa0aa;
+}
+
+.log-info .log-level {
+  color: #6fb3ff;
+}
+
+.log-warn {
+  color: #ffcf6f;
+}
+.log-warn .log-level {
+  color: #ffcf6f;
+}
+
+.log-error {
+  color: #ff7a7a;
+  background: rgba(255, 80, 80, 0.12);
+}
+.log-error .log-level {
+  color: #ff7a7a;
+}
+
+.log-success .log-level {
+  color: #7ee08a;
+}
+
+/* ---------- fail banner ---------- */
+.fail-banner {
+  background: #ffe9e9;
+  border: 1px solid #ffb3b3;
+  color: #a30000;
+  border-radius: 8px;
+  padding: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+/* ---------- quiz ---------- */
+.quiz {
+  background: #fff;
+  border: 1px solid #e3e3e8;
+  border-radius: 10px;
+  padding: 1.25rem 1.5rem;
+}
+
+.quiz-empty {
+  color: #555;
+}
+
+.quiz-progress {
+  font-size: 0.8rem;
+  color: #777;
+  margin-bottom: 0.4rem;
+}
+
+.quiz-question {
+  margin: 0 0 1rem;
+  font-size: 1.15rem;
+}
+
+.quiz-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.quiz-option {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid #d8d8de;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.quiz-option:hover {
+  background: #f6f6fb;
+}
+
+.quiz-option.selected {
+  border-color: #6b6bff;
+  background: #f0f0ff;
+}
+
+.quiz-option.option-correct {
+  border-color: #4caf50;
+  background: #e8f7e9;
+}
+
+.quiz-option.option-incorrect {
+  border-color: #e25656;
+  background: #fdeaea;
+}
+
+.quiz-option.option-reveal {
+  border-color: #4caf50;
+}
+
+.quiz-nav {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 1.25rem;
+}
+
+.quiz-nav button {
+  padding: 0.5rem 1rem;
+  border: 1px solid #d0d0d5;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.quiz-nav button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.quiz-score {
+  margin-top: 1.25rem;
+  font-weight: 600;
+}
+
+/* ---------- raw json modal ---------- */
+.raw-json-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  z-index: 50;
+}
+
+.raw-json-panel {
+  background: #fff;
+  border-radius: 10px;
+  max-width: 720px;
+  width: 100%;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.raw-json-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid #e3e3e8;
+  font-weight: 600;
+}
+
+.raw-json-header button {
+  border: none;
+  background: transparent;
+  font-size: 1.25rem;
+  line-height: 1;
+}
+
+.raw-json-content {
+  margin: 0;
+  padding: 1rem;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  background: #fafafa;
+}

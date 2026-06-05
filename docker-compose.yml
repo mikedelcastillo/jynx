@@ -1,0 +1,34 @@
+# Jynx — webpage/text-to-quiz POC (two services: FastAPI backend + Next.js frontend).
+# The OpenAI-compatible LLM endpoint (Olla/Ollama) is EXTERNAL and not part of this stack.
+# (The obsolete top-level `version` key is intentionally omitted.)
+
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      # OpenAI-compatible endpoint config. Defaults match the backend's own defaults.
+      # To reach an LLM endpoint running on the HOST machine, set:
+      #   OPENAI_BASE_URL=http://host.docker.internal:40114/v1
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-http://localhost:40114/v1}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-ollama}
+      - OPENAI_MODEL=${OPENAI_MODEL:-qwen2.5:14b}
+    # Lets the container resolve `host.docker.internal` to the host, so the backend
+    # can reach an OpenAI-compatible endpoint running on the host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # NEXT_PUBLIC_API_BASE_URL is baked in at build time (it ships to the browser).
+        # The browser calls the host-mapped backend, so this points at localhost:8000.
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+    environment:
+      - NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
