@@ -26,6 +26,19 @@ PORT = int(os.getenv("PORT", "8000"))
 REQUEST_TIMEOUT = 10  # seconds
 MAX_HTML_BYTES = 3_000_000
 MAX_EXTRACTED_CHARS = 40_000
+MIN_EXTRACTED_CHARS = 200  # below this, a fetched source is treated as unusable
 MAX_CONTEXT_CHARS = 16_000
 TARGET_CHUNK_WORDS = 900
 NUM_QUESTIONS = 8
+
+# A descriptive User-Agent is what most sites (e.g. Wikipedia) expect; the httpx
+# default UA is frequently blocked with a 403.
+USER_AGENT = os.getenv(
+    "FETCH_USER_AGENT",
+    "JynxQuizBot/0.1 (+https://github.com/; educational quiz generator)",
+)
+
+# LLM call timeouts (seconds). REQUEST_TIMEOUT above is for fetching only.
+LLM_CONNECT_TIMEOUT = 10  # establishing the connection
+LLM_READ_TIMEOUT = 60  # max gap waiting for the next/first streamed token
+LLM_TIMEOUT = 120  # overall wall-clock cap for one generation

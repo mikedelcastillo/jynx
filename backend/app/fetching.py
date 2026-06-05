@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 import httpx
 
 from . import events
-from .config import MAX_HTML_BYTES, REQUEST_TIMEOUT
+from .config import MAX_HTML_BYTES, REQUEST_TIMEOUT, USER_AGENT
 
 
 def _ip_is_blocked(ip_str) -> bool:
@@ -84,7 +84,9 @@ async def fetch_url(url, emit):
             )
         try:
             async with httpx.AsyncClient(
-                timeout=REQUEST_TIMEOUT, follow_redirects=True
+                timeout=REQUEST_TIMEOUT,
+                follow_redirects=True,
+                headers={"User-Agent": USER_AGENT},
             ) as client:
                 response = await client.get(url)
 
@@ -104,6 +106,20 @@ async def fetch_url(url, emit):
             await emit(
                 events.log("HTTP status", url=url, status=response.status_code)
             )
+
+            # A non-2xx response is not usable content (e.g. a 403 block page);
+            # fail fast rather than feed an error body downstream. No retry: the
+            # status is unlikely to change on an immediate second attempt.
+            if response.status_code >= 400:
+                await emit(
+                    events.log(
+                        "HTTP error status",
+                        level="error",
+                        url=url,
+                        status=response.status_code,
+                    )
+                )
+                return None
 
             content_type = response.headers.get("content-type", "")
             await emit(events.log("Content type", url=url, content_type=content_type))

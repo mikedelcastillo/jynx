@@ -4,11 +4,13 @@ import asyncio
 import json
 import re
 
+import httpx
+from openai import APIConnectionError
 from pydantic import ValidationError
 
 from . import events, fetching, llm
 from .chunking import chunk_sources, select_chunks
-from .config import NUM_QUESTIONS
+from .config import MIN_EXTRACTED_CHARS, NUM_QUESTIONS
 from .extraction import extract_text
 from .models import GenerateRequest, QuizResult
 
@@ -162,8 +164,19 @@ async def _work(req: GenerateRequest, emit):
         # Cleaning happens inside extract_text; this marks the step boundary.
         await emit(events.log("Text cleaning completed", url=url, chars=len(text)))
 
-        if text.strip():
+        stripped = text.strip()
+        if len(stripped) >= MIN_EXTRACTED_CHARS:
             sources.append({"label": url, "text": text})
+        elif stripped:
+            await emit(
+                events.log(
+                    "Extracted content too short, skipping source",
+                    level="warn",
+                    url=url,
+                    chars=len(stripped),
+                    min=MIN_EXTRACTED_CHARS,
+                )
+            )
         else:
             await emit(
                 events.log(
@@ -177,12 +190,12 @@ async def _work(req: GenerateRequest, emit):
 
     # Step 3: bail out if nothing usable.
     if not sources:
-        await emit(
-            events.log(
-                "No usable content could be gathered.", level="error"
-            )
+        message = (
+            "No usable content could be gathered — sources were blocked, "
+            "empty, or too short."
         )
-        return _fail_result("No usable content could be gathered.")
+        await emit(events.log(message, level="error"))
+        return _fail_result(message)
 
     # Step 4: chunking.
     await emit(events.log("Chunking started"))
@@ -211,7 +224,15 @@ async def _work(req: GenerateRequest, emit):
 
     # Step 6: LLM call.
     await emit(events.log("LLM call started"))
-    raw_text = await llm.stream_completion(messages, emit)
+    try:
+        raw_text = await llm.stream_completion(messages, emit)
+    except (asyncio.TimeoutError, httpx.TimeoutException, APIConnectionError) as exc:
+        # APIConnectionError covers the SDK-wrapped timeout (APITimeoutError) and
+        # an unreachable endpoint; asyncio.TimeoutError is our wall-clock cap.
+        await emit(
+            events.log("LLM call timed out", level="error", error=str(exc))
+        )
+        return _fail_result("The model could not be reached or did not respond in time.")
     await emit(
         events.log("LLM call completed", level="success", chars=len(raw_text))
     )

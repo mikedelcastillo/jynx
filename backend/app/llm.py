@@ -1,11 +1,33 @@
 """OpenAI-compatible LLM client, prompt building, and streaming."""
 
-from openai import AsyncOpenAI
+import asyncio
+
+import httpx
+from openai import APIConnectionError, AsyncOpenAI
 
 from . import events
-from .config import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL
+from .config import (
+    LLM_CONNECT_TIMEOUT,
+    LLM_READ_TIMEOUT,
+    LLM_TIMEOUT,
+    OPENAI_API_KEY,
+    OPENAI_BASE_URL,
+    OPENAI_MODEL,
+)
 
-_client = AsyncOpenAI(base_url=OPENAI_BASE_URL, api_key=OPENAI_API_KEY)
+# Explicit timeouts so a slow or stalled endpoint can never hang the request.
+# read caps the gap between streamed tokens (the first-token wait especially);
+# LLM_TIMEOUT is the overall per-call ceiling.
+# max_retries=0: a timeout should fail fast and predictably, not silently
+# retry (the SDK default is 2) and blow past our wall-clock cap.
+_client = AsyncOpenAI(
+    base_url=OPENAI_BASE_URL,
+    api_key=OPENAI_API_KEY,
+    max_retries=0,
+    timeout=httpx.Timeout(
+        LLM_TIMEOUT, connect=LLM_CONNECT_TIMEOUT, read=LLM_READ_TIMEOUT
+    ),
+)
 
 _SYSTEM_PROMPT = """You generate multiple-choice quizzes from provided source material.
 
@@ -73,37 +95,46 @@ async def stream_completion(messages, emit):
             kwargs["response_format"] = {"type": "json_object"}
         return await _client.chat.completions.create(**kwargs)
 
-    try:
-        stream = await _run(use_json_format)
-    except Exception as exc:  # noqa: BLE001 - endpoint may reject response_format
-        await emit(
-            events.log(
-                "response_format not supported, retrying without it",
-                level="warn",
-                error=str(exc),
-            )
-        )
-        use_json_format = False
-        stream = await _run(use_json_format)
-
-    chunk_index = 0
-    async for event in stream:
-        if not event.choices:
-            continue
-        delta = event.choices[0].delta
-        piece = getattr(delta, "content", None)
-        if piece:
-            content_parts.append(piece)
-            chunk_index += 1
-            # Throttle token logs so we don't spam the stream.
-            if chunk_index % 20 == 0:
-                await emit(
-                    events.log(
-                        "LLM chunk received",
-                        chunks=chunk_index,
-                        chars=sum(len(p) for p in content_parts),
-                    )
+    # Overall wall-clock cap covering connection AND streaming; `async with
+    # stream` closes the HTTP connection on exit (including timeout/cancel) so a
+    # stalled endpoint can't leak it.
+    async with asyncio.timeout(LLM_TIMEOUT):
+        try:
+            stream = await _run(use_json_format)
+        except (APIConnectionError, httpx.TimeoutException):
+            # A timeout/connection failure is not a response_format rejection;
+            # let it propagate so the pipeline reports it cleanly.
+            raise
+        except Exception as exc:  # noqa: BLE001 - endpoint may reject response_format
+            await emit(
+                events.log(
+                    "response_format not supported, retrying without it",
+                    level="warn",
+                    error=str(exc),
                 )
+            )
+            use_json_format = False
+            stream = await _run(use_json_format)
+
+        chunk_index = 0
+        async with stream:
+            async for event in stream:
+                if not event.choices:
+                    continue
+                delta = event.choices[0].delta
+                piece = getattr(delta, "content", None)
+                if piece:
+                    content_parts.append(piece)
+                    chunk_index += 1
+                    # Throttle token logs so we don't spam the stream.
+                    if chunk_index % 20 == 0:
+                        await emit(
+                            events.log(
+                                "LLM chunk received",
+                                chunks=chunk_index,
+                                chars=sum(len(p) for p in content_parts),
+                            )
+                        )
 
     return "".join(content_parts)
 
