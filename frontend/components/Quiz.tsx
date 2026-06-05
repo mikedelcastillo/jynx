@@ -56,7 +56,9 @@ export default function Quiz({ questions }: QuizProps) {
                 checked={isSelected}
                 onChange={() => select(opt.value)}
               />
-              <span>{opt.label}</span>
+              <span>
+                <strong>{opt.label}.</strong> {opt.value}
+              </span>
             </label>
           );
         })}
