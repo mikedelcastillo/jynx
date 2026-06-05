@@ -33,7 +33,7 @@ Jynx is a retrieval-augmented quiz generator. Paste in some text and/or a few pu
 Browser
    │  (HTTP / streamed NDJSON events)
    ▼
-Frontend — Next.js (App Router, TypeScript)        :3000
+Frontend — Next.js (App Router, TypeScript)        :4000
    │  POST /api/generate-quiz-stream
    ▼
 Backend — FastAPI (Python)                          :8000
@@ -74,9 +74,17 @@ cp .env.example .env             # then edit OPENAI_* / NEXT_PUBLIC_API_BASE_URL
 docker compose up --build
 ```
 
-Frontend → http://localhost:3000 · Backend → http://localhost:8000. To reach an LLM endpoint on the **host** from inside the containers, set `OPENAI_BASE_URL=http://host.docker.internal:40114/v1`.
+Frontend → http://localhost:4000 · Backend → http://localhost:8000. To reach an LLM endpoint on the **host** from inside the containers, set `OPENAI_BASE_URL=http://host.docker.internal:40114/v1`.
 
-### Run locally (two terminals)
+### Run locally — one command
+
+```bash
+./dev.sh
+```
+
+`dev.sh` sets up the venv / `node_modules` and `.env` on first run, then runs **both services in the current terminal** with color-labeled, interleaved logs — `[backend]` on `:8000`, `[frontend]` on `:4000`. **Ctrl-C stops both.** Then open **http://localhost:4000**.
+
+### Run locally — two terminals (manual)
 
 Both services read the root `.env` you created above — no per-service env files needed.
 
@@ -85,15 +93,26 @@ Both services read the root `.env` you created above — no per-service env file
 cd backend
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+python -m app                   # binds 0.0.0.0:8000 (auto-reload on)
 ```
+
+The backend binds `0.0.0.0` by default so it's reachable on your network; override with `HOST`/`PORT`, or disable reload with `RELOAD=false`. (Equivalent: `uvicorn app.main:app --reload --host 0.0.0.0 --port 8000`.)
 
 **Frontend**
 ```bash
 cd frontend
 npm install
-npm run dev                     # open http://localhost:3000
+npm run dev                     # open http://localhost:4000
 ```
+
+### Accessing it from another device (LAN development)
+
+The app is **single-origin**: the browser only ever talks to the frontend. It calls a relative `/api/...` path, and the Next.js server **proxies that to the backend** (`next.config.mjs` `rewrites()`). So you can open the app from your laptop/phone using the dev machine's IP — e.g. `http://192.168.1.60:3000` — and it just works, with no IP to hardcode and no CORS.
+
+- `BACKEND_ORIGIN` (default `http://localhost:8000`) is where the **Next server** forwards `/api/*`. It's server-side only — the browser never sees it. Change it if the backend runs elsewhere relative to the frontend host.
+- Optional escape hatch: set `NEXT_PUBLIC_API_BASE_URL` to have the browser call a backend **directly** (bypassing the proxy); that backend must then allow CORS. Leave unset to use the proxy.
+
+> Because everything is same-origin, only the frontend port needs to be reachable from other devices.
 
 ## Configuring the LLM endpoint
 
@@ -107,7 +126,7 @@ The backend talks to any OpenAI-compatible **chat-completions** endpoint (defaul
 
 ## Trying it out
 
-Open http://localhost:3000 and:
+Open http://localhost:4000 and:
 
 - **Paste text only** — drop in a couple of paragraphs, add no URLs, and hit **Submit**.
 - **Use a public URL** — type a URL, press **Enter** to add it as a chip, then **Submit**.
@@ -133,7 +152,7 @@ jynx/
 │   ├── scripts/            # eval.py
 │   ├── Dockerfile
 │   └── requirements.txt
-├── frontend/               # Next.js App Router app (:3000)
+├── frontend/               # Next.js App Router app (:4000)
 │   ├── app/                # layout, page (input/loading/result states), styles
 │   ├── components/         # UrlInput, LogConsole, Quiz, RawJsonPanel
 │   ├── lib/                # NDJSON streaming client + shared types

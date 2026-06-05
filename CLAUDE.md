@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Jynx is a V0 proof-of-concept that turns public webpages and/or pasted text into a playable multiple-choice quiz, streaming every backend step to the browser live. Two independently runnable services: a **Next.js** frontend (`frontend/`, port 3000) and a **FastAPI** backend (`backend/`, port 8000). The LLM is an **external OpenAI-compatible endpoint** — there is intentionally no database, vector store, cache, queue, or agent framework. Keep changes small and the pipeline readable; simplicity is a design goal (see `PLAN.md` for the full V0 contract).
+Jynx is a V0 proof-of-concept that turns public webpages and/or pasted text into a playable multiple-choice quiz, streaming every backend step to the browser live. Two independently runnable services: a **Next.js** frontend (`frontend/`, port 4000) and a **FastAPI** backend (`backend/`, port 8000). The LLM is an **external OpenAI-compatible endpoint** — there is intentionally no database, vector store, cache, queue, or agent framework. Keep changes small and the pipeline readable; simplicity is a design goal (see `PLAN.md` for the full V0 contract).
 
 ## Commands
 
@@ -18,7 +18,7 @@ Backend (`backend/`):
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-uvicorn app.main:app --reload --port 8000      # dev server
+python -m app                                   # dev server — binds 0.0.0.0:8000, auto-reload (HOST/PORT/RELOAD env-overridable)
 python scripts/eval.py                          # offline eval (needs a reachable OPENAI_BASE_URL)
 python -c "from app.main import app"            # quick import smoke test
 ```
@@ -27,13 +27,14 @@ Frontend (`frontend/`):
 ```bash
 npm install
 cp .env.example .env.local
-npm run dev                                     # dev server on :3000
+npm run dev                                     # dev server on :4000
 npm run build                                   # production build (also the typecheck/lint gate)
 ```
 
 Whole stack:
 ```bash
-docker compose up --build                       # frontend :3000 + backend :8000
+./dev.sh                                        # backend :8000 + frontend :4000 in one terminal (labeled logs, Ctrl-C stops both); sets up venv/node_modules/.env on first run
+docker compose up --build                       # frontend :4000 + backend :8000
 ```
 
 There is no unit-test suite; `scripts/eval.py` is the closest thing (an end-to-end pasted-text-only check against a live LLM), and `npm run build` is the frontend's correctness gate.
@@ -56,4 +57,4 @@ All tunable limits and the `OPENAI_*` env vars live in `config.py` — that file
 
 ### Frontend (`frontend/`)
 
-App Router, single client page (`app/page.tsx`) with a three-state machine: `input → loading → result`. The frontend **never calls the LLM or fetches target webpages** — it only talks to the backend. `lib/stream.ts` `streamQuiz()` is an async generator that POSTs and yields parsed NDJSON events (handling partial-line buffering); `page.tsx` appends log events to the live `LogConsole` and switches to the result view on the `final` event. Quiz play (`components/Quiz.tsx`) is entirely client-side. `NEXT_PUBLIC_API_BASE_URL` is **baked at build time** (it's a `NEXT_PUBLIC_` var), so the Docker image takes it as a build ARG.
+App Router, single client page (`app/page.tsx`) with a three-state machine: `input → loading → result`. The frontend **never calls the LLM or fetches target webpages** — it only talks to the backend. `lib/stream.ts` `streamQuiz()` is an async generator that POSTs and yields parsed NDJSON events (handling partial-line buffering); `page.tsx` appends log events to the live `LogConsole` and switches to the result view on the `final` event. Quiz play (`components/Quiz.tsx`) is entirely client-side. The app is **single-origin**: `lib/stream.ts` fetches a relative `/api/...` path, and `next.config.mjs` `rewrites()` proxies `/api/*` to `BACKEND_ORIGIN` (server-side env, default `http://localhost:8000`; the backend service name under Compose). This means no baked-in IP and no CORS — the app works from any device that can reach the frontend. `rewrites()` resolves when next.config loads (startup for `next dev`, build time for the standalone image — hence `BACKEND_ORIGIN` is a Docker build ARG). `compress: false` keeps the proxied NDJSON stream from being buffered. `NEXT_PUBLIC_API_BASE_URL` is an optional override to bypass the proxy and call a backend directly.

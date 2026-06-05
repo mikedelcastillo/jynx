@@ -5,6 +5,9 @@
 services:
   backend:
     build: ./backend
+    # Publishing 8000 is optional now that the frontend proxies /api/* internally
+    # (over the compose network). Kept for direct curl / eval access; remove for a
+    # single-entry-point setup where only the frontend port is exposed.
     ports:
       - "8000:8000"
     environment:
@@ -23,12 +26,17 @@ services:
     build:
       context: ./frontend
       args:
-        # NEXT_PUBLIC_API_BASE_URL is baked in at build time (it ships to the browser).
-        # The browser calls the host-mapped backend, so this points at localhost:8000.
-        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+        # Server-side proxy target: the Next server forwards /api/* here over the
+        # compose network. Baked when `next build` runs, so it's a build ARG.
+        # The browser only ever calls the frontend origin (relative /api/...),
+        # so this works from any device with no IP to configure and no CORS.
+        BACKEND_ORIGIN: ${BACKEND_ORIGIN:-http://backend:8000}
+        # Optional: set to bypass the proxy and call a backend directly.
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-}
     environment:
-      - NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+      - BACKEND_ORIGIN=${BACKEND_ORIGIN:-http://backend:8000}
+      - NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL:-}
     ports:
-      - "3000:3000"
+      - "4000:4000"
     depends_on:
       - backend

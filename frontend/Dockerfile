@@ -10,8 +10,12 @@ RUN npm ci
 FROM node:24-alpine AS builder
 WORKDIR /app
 
-# NEXT_PUBLIC_* vars are baked at build time. Pass with --build-arg.
-ARG NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
+# Build-time config. The rewrite proxy target (BACKEND_ORIGIN) is resolved when
+# `next build` evaluates next.config, so it must be set here. NEXT_PUBLIC_* is an
+# optional proxy-bypass override (also baked at build). Pass with --build-arg.
+ARG BACKEND_ORIGIN=http://backend:8000
+ENV BACKEND_ORIGIN=${BACKEND_ORIGIN}
+ARG NEXT_PUBLIC_API_BASE_URL=
 ENV NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL}
 
 COPY --from=deps /app/node_modules ./node_modules
@@ -23,7 +27,7 @@ FROM node:24-alpine AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production
-ENV PORT=3000
+ENV PORT=4000
 ENV HOSTNAME=0.0.0.0
 
 # Copy the standalone output. public/ is optional; create a placeholder so the
@@ -32,5 +36,5 @@ COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 
-EXPOSE 3000
+EXPOSE 4000
 CMD ["node", "server.js"]

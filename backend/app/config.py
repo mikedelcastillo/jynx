@@ -17,6 +17,11 @@ OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://localhost:40114/v1")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "ollama")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "qwen2.5:14b")
 
+# Server bind. Defaults to 0.0.0.0 so the backend is reachable from other
+# devices/containers, not just localhost. Override with HOST/PORT env vars.
+HOST = os.getenv("HOST", "0.0.0.0")
+PORT = int(os.getenv("PORT", "8000"))
+
 # Limits / tuning constants.
 REQUEST_TIMEOUT = 10  # seconds
 MAX_HTML_BYTES = 3_000_000

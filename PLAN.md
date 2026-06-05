@@ -55,7 +55,7 @@ jynx/
     .env.example
 ```
 
-- **Frontend (Next.js, port 3000):** UI only. Never calls the LLM, never fetches target webpages. Posts to the backend stream endpoint and renders streamed logs + final quiz.
+- **Frontend (Next.js, port 4000):** UI only. Never calls the LLM, never fetches target webpages. Posts to the backend stream endpoint and renders streamed logs + final quiz.
 - **Backend (FastAPI, port 8000):** does all ingestion, fetching, chunking, LLM orchestration, validation, normalization, and streaming.
 
 Frontend talks to backend at `NEXT_PUBLIC_API_BASE_URL` (default `http://localhost:8000`). Backend talks to an external OpenAI-compatible endpoint at `OPENAI_BASE_URL`.
@@ -159,13 +159,13 @@ Flow: parse JSON -> if parse fails, one repair pass (ask LLM to fix to valid JSO
 
 See README. Summary:
 - Backend: `cd backend && python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt && cp .env.example .env && uvicorn app.main:app --reload --port 8000`.
-- Frontend: `cd frontend && npm install && cp .env.example .env.local && npm run dev` (port 3000).
+- Frontend: `cd frontend && npm install && cp .env.example .env.local && npm run dev` (port 4000).
 - Eval: `cd backend && python scripts/eval.py`.
 
 ## 12. Docker deployment plan
 
 - `backend/Dockerfile`: python:3.12-slim, install requirements, run uvicorn on 8000.
-- `frontend/Dockerfile`: node:24-alpine multi-stage, `next build`, run `next start` on 3000.
+- `frontend/Dockerfile`: node:24-alpine multi-stage, `next build`, run `next start` on 4000.
 - `docker-compose.yml`: two services (`backend`, `frontend`). Backend reads `OPENAI_*` from env/`.env`. Frontend gets `NEXT_PUBLIC_API_BASE_URL`. For browser-side calls the frontend uses `http://localhost:8000` (host-mapped). No DB/Redis/vector/Ollama containers — the OpenAI-compatible endpoint is external (`OPENAI_BASE_URL`, reachable via `host.docker.internal`).
 
 ## 13. Implementation checklist
