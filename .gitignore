@@ -5,6 +5,9 @@ __pycache__/
 venv/
 *.egg-info/
 
+# --- Backend local artifacts ---
+backend/.cache/
+
 # --- Node / Next.js ---
 node_modules/
 .next/

@@ -2,11 +2,19 @@
 
 import { useRef, useState } from "react";
 import UrlInput from "@/components/UrlInput";
-import LogConsole from "@/components/LogConsole";
+import PipelineGraph from "@/components/PipelineGraph";
+import LogDrawer from "@/components/LogDrawer";
 import Quiz from "@/components/Quiz";
 import RawJsonPanel from "@/components/RawJsonPanel";
 import { streamQuiz } from "@/lib/stream";
-import type { LogEvent, QuizResult } from "@/lib/types";
+import type {
+  LogEvent,
+  QuizResult,
+  SourceState,
+  SourceFetchState,
+  ChunkState,
+  PipelineState,
+} from "@/lib/types";
 
 type View = "input" | "loading" | "result";
 
@@ -14,9 +22,13 @@ export default function Page() {
   const [view, setView] = useState<View>("input");
   const [urls, setUrls] = useState<string[]>([]);
   const [text, setText] = useState("");
+  const [count, setCount] = useState(10);
   const [logs, setLogs] = useState<LogEvent[]>([]);
   const [result, setResult] = useState<QuizResult | null>(null);
   const [showRaw, setShowRaw] = useState(false);
+  const [sources, setSources] = useState<SourceState[]>([]);
+  const [chunks, setChunks] = useState<Record<number, ChunkState>>({});
+  const [pipeline, setPipeline] = useState<PipelineState | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
 
@@ -30,11 +42,14 @@ export default function Page() {
     setLogs([]);
     setResult(null);
     setShowRaw(false);
+    setSources([]);
+    setChunks({});
+    setPipeline(null);
     setView("loading");
 
     try {
       for await (const event of streamQuiz(
-        { urls: runUrls, text: runText },
+        { urls: runUrls, text: runText, num_questions: count },
         controller.signal
       )) {
         if (event.type === "log") {
@@ -42,6 +57,43 @@ export default function Page() {
         } else if (event.type === "final") {
           setResult(event.data);
           setView("result");
+        } else if (event.type === "progress") {
+          if (event.phase === "fetch" && event.source) {
+            setSources((prev) => {
+              const next = prev.filter((s) => s.source !== event.source);
+              return [
+                ...next,
+                {
+                  source: event.source!,
+                  state: (event.state as SourceFetchState) ?? "fetching",
+                },
+              ];
+            });
+          } else {
+            setPipeline((prev) => ({
+              phase: event.phase,
+              total: event.total ?? prev?.total ?? 0,
+              done: event.done ?? prev?.done ?? 0,
+              running: event.running ?? prev?.running ?? 0,
+              failed: event.failed ?? prev?.failed ?? 0,
+              questions: event.questions ?? prev?.questions ?? 0,
+              reduceStep:
+                event.phase === "reduce" ? event.step : prev?.reduceStep,
+            }));
+          }
+        } else if (event.type === "chunk") {
+          setChunks((prev) => ({
+            ...prev,
+            [event.id]: {
+              id: event.id,
+              source: event.source,
+              state: event.state,
+              chars: event.chars ?? prev[event.id]?.chars ?? 0,
+              count: event.count ?? prev[event.id]?.count ?? 0,
+              attempt: event.attempt ?? prev[event.id]?.attempt ?? 0,
+              error: event.error ?? prev[event.id]?.error,
+            },
+          }));
         }
       }
     } catch (err) {
@@ -110,6 +162,19 @@ export default function Page() {
           rows={6}
         />
 
+        <label className="field-label">Number of questions</label>
+        <input
+          type="number"
+          className="text-area"
+          value={count}
+          min={1}
+          max={30}
+          onChange={(e) => {
+            const n = parseInt(e.target.value, 10);
+            setCount(Number.isNaN(n) ? 10 : Math.max(1, Math.min(30, n)));
+          }}
+        />
+
         <button
           type="button"
           className="primary-btn"
@@ -125,13 +190,15 @@ export default function Page() {
   if (view === "loading") {
     return (
       <div className="view-loading">
-        <h2 className="title">Quizzifying...</h2>
-        <LogConsole logs={logs} />
-        <div className="button-row">
+        <div className="loading-graph">
+          <PipelineGraph sources={sources} chunks={chunks} pipeline={pipeline} />
+        </div>
+        <div className="loading-toolbar">
           <button type="button" onClick={handleClose}>
             Close
           </button>
         </div>
+        <LogDrawer logs={logs} />
       </div>
     );
   }

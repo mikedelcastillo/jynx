@@ -1,6 +1,6 @@
 # Jynx — V0 Plan
 
-Jynx is a webpage/text-to-quiz RAG-style proof of concept. Users enter public webpage URLs and/or paste extra text/instructions. The backend fetches the pages, extracts and chunks text in memory, sends the gathered context to an LLM via an OpenAI-compatible API, and returns a playable multiple-choice quiz. Every backend action is streamed live to the client.
+Jynx is a webpage/text-to-quiz RAG-style proof of concept. Users enter public webpage URLs and/or paste extra text/instructions and choose how many questions they want. The backend fetches the pages, extracts and chunks text in memory, then fans out one LLM call per selected chunk (map) and reduces the combined questions down to the requested count via dedupe + an LLM selector (reduce), returning a playable multiple-choice quiz. All LLM calls go through an OpenAI-compatible API. Every backend action is streamed live to the client.
 
 This document is the V0 contract. Keep everything simple — this is a POC, not a product.
 
@@ -64,22 +64,22 @@ Frontend talks to backend at `NEXT_PUBLIC_API_BASE_URL` (default `http://localho
 
 - Render the single-page UI with three states: input, loading, result.
 - Manage URL list (Enter to add, X to remove) and textarea state.
-- POST `{ urls, text }` to backend stream endpoint and read the streamed body.
-- Parse newline-delimited JSON events; render logs live in an auto-scrolling console; show errors visibly.
+- POST `{ urls, text, num_questions }` to backend stream endpoint and read the streamed body.
+- Parse newline-delimited JSON events; from the `chunk`/`progress` events render a live radial pipeline graph (React Flow / `@xyflow/react`) during loading, with a bottom-docked collapsible log drawer for the raw NDJSON trail; show errors visibly.
 - On `final` event, store normalized output and transition to result screen.
 - Result screen: Retry, Close (back to input), View sample results (raw JSON modal/panel).
 - Play the quiz fully client-side: multiple choice, prev/next, changeable answers, score = correct/total. No timer, no ranks, no modes.
 
 ## 4. Python backend responsibilities
 
-- Accept POST `{ urls, text }`.
+- Accept POST `{ urls, text, num_questions }` (`num_questions` clamped server-side to 1–30).
 - Validate URLs (scheme + SSRF blocklist). Stream blocked URLs with reason.
 - Safely fetch each allowed URL (timeout, size cap, redirect re-validation).
 - Extract readable text (trafilatura primary, BeautifulSoup fallback), clean, cap length.
-- Combine webpage + pasted text, chunk in memory with source labels, select diverse chunks, cap total context.
-- Build the LLM prompt; call the OpenAI-compatible chat completions endpoint (streaming).
-- Parse JSON; on failure attempt one repair pass; validate with Pydantic; normalize.
-- Stream every step as JSON events; emit a single `final` event with the normalized output. Always return the normalized shape, even on failure.
+- Combine webpage + pasted text, chunk in memory with source labels, select up to `MAX_MAP_CHUNKS` source-balanced chunks for the map phase.
+- **Map:** fan out one OpenAI-compatible chat completion per selected chunk (streaming), each grounded in that chunk only and asking for a small per-chunk quota; run them concurrently bounded by `MAP_CONCURRENCY`. Parse/repair/normalize/validate each result independently; a chunk that fails is logged and skipped, not fatal.
+- **Reduce:** combine all validated questions (tagged by source), drop near-duplicates heuristically, then run a single LLM selector call that picks at most `num_questions` deduped, source-balanced questions by index (it selects, never rewrites); fall back to a deterministic round-robin trim if the selector fails.
+- Stream every step as JSON events (`log` lines plus per-chunk `chunk` lifecycle events and stage `progress` snapshots for the live UI); emit a single `final` event with the normalized output. Always return the normalized shape; only `fail` when no chunk produced any valid question.
 
 Direct Python only. No LangChain / LangGraph / agent framework.
 
@@ -89,10 +89,11 @@ Direct Python only. No LangChain / LangGraph / agent framework.
 
 Request body:
 ```json
-{ "urls": ["https://example.com/article"], "text": "extra pasted info or instructions" }
+{ "urls": ["https://example.com/article"], "text": "extra pasted info or instructions", "num_questions": 10 }
 ```
+`num_questions` is optional (default 10) and clamped server-side to 1–30.
 
-Response: `text/event-stream` style streaming body. The transport is **newline-delimited JSON** (one JSON object per line, `\n` terminated) for simplicity and reliability with `fetch` streaming. (We use NDJSON rather than formal SSE `data:` framing — it is simpler to parse on both ends and works with plain streaming fetch.) `Content-Type: application/x-ndjson`. Each line is one event object. The last event has `type: "final"`.
+Response: `text/event-stream` style streaming body. The transport is **newline-delimited JSON** (one JSON object per line, `\n` terminated) for simplicity and reliability with `fetch` streaming. (We use NDJSON rather than formal SSE `data:` framing — it is simpler to parse on both ends and works with plain streaming fetch.) `Content-Type: application/x-ndjson`. Each line is one event object — `log`, `chunk`, or `progress` along the way, with exactly one terminal `type: "final"` last.
 
 Health: `GET /api/health` -> `{ "status": "ok" }`.
 
@@ -100,7 +101,7 @@ CORS: allow the frontend origin (`*` is fine for V0).
 
 ## 6. Streaming event format
 
-JSON objects, one per line.
+JSON objects, one per line. Four event types: `log`, `chunk`, `progress`, and a single terminal `final`.
 
 Log event:
 ```json
@@ -108,41 +109,51 @@ Log event:
 ```
 `level` ∈ `info | warn | error | success`. `data` optional.
 
+Chunk event (one per-chunk map-task's lifecycle; live — `chars` ticks up while running):
+```json
+{ "type": "chunk", "id": 0, "source": "https://example.com", "state": "running", "chars": 120, "count": 0, "attempt": 1, "error": null }
+```
+`state` ∈ `queued | running | retrying | done | failed`. `chars`/`count`/`attempt`/`error` are optional and depend on state.
+
+Progress event (pipeline stage snapshot):
+```json
+{ "type": "progress", "phase": "map", "total": 8, "done": 3, "running": 2, "failed": 0, "questions": 11 }
+```
+`phase` ∈ `fetch | chunk | map | reduce | done`. `fetch` carries `source` + `state` (`fetching`/`ready`/`blocked`); `map` carries `total`/`done`/`running`/`failed`/`questions`; `reduce` carries `step` (`dedupe`/`selection`/`fallback`) + counts.
+
 Final event:
 ```json
 { "type": "final", "data": { "status": "ok", "message": "all ok", "data": { "questions": [] } } }
 ```
 
-The frontend treats any `type: "log"` as a console line and `type: "final"` as completion.
+The frontend treats `type: "log"` as a console line, builds its live radial pipeline graph from `chunk`/`progress` events, and treats `type: "final"` as completion (exactly one).
 
 ## 7. Ingestion pipeline
 
-1. `request received` — echo counts of urls/text.
+1. `request received` — echo counts of urls/text and requested `num_questions`.
 2. For each URL: `validating URLs` -> validate -> `blocked URL` (with reason) or `fetching URL`.
 3. Fetch: `fetch started`, `HTTP status`, `content type`, `raw HTML size`, `fetch completed`. On error: `retry attempt` (one retry), `retry failed`/`retry succeeded`. On final failure stream error and continue.
 4. Extract: `extraction started`, `extracted text size`, `extraction fallback used` if BS4 path taken.
 5. Clean: `text cleaning started`, `text cleaning completed`.
-6. Combine + chunk: `chunking started`, `chunk count`, `approximate chunk sizes`.
-7. Prompt: `LLM prompt preparation started`, `approximate context length`.
-8. LLM: `LLM call started`, optional `LLM token/chunk received`, `LLM call completed`.
-9. Parse/validate: `JSON parse started`, `JSON parse failed`, `JSON repair attempted`, `validation started`, `validation errors`, `final output normalized`, `done`.
-10. `final` event with normalized output.
+6. Combine + chunk: `chunking started`, `chunk count`, `approximate chunk sizes`, then `selected map chunks` (up to `MAX_MAP_CHUNKS`, source-balanced).
+7. **Map** (per selected chunk, concurrent, bounded by `MAP_CONCURRENCY`): `chunk LLM call started`, optional `LLM token/chunk received`, then per-chunk parse/repair/normalize/validate; `chunk produced N questions` or, on failure/timeout, `chunk skipped` (warn). Not fatal. Each chunk also emits `chunk` lifecycle events (`queued`→`running`/`retrying`→`done`/`failed`) and the phase emits `progress` snapshots for the live UI.
+8. **Reduce:** `collected M questions`, `dedupe removed K`, `selector call started`/`selector picked N` (or `selector fallback (balanced trim)` if it fails/empties), `final output normalized`, `done`. Reduce steps also emit `progress` snapshots (`step` ∈ `dedupe`/`selection`/`fallback`).
+9. `final` event with normalized output (exactly one).
 
-If no usable content was gathered (all URLs failed and no pasted text), emit a `fail` final.
+If no usable content was gathered (all URLs failed and no pasted text) or no chunk produced any valid question, emit a `fail` final.
 
 ## 8. In-memory chunking strategy
 
 - Combine all extracted webpage texts + pasted text. Keep a `source` label per chunk (e.g. URL or `pasted-text`).
 - Split each source on blank lines (paragraph-aware); greedily pack paragraphs into chunks targeting ~900 words (≈ 5400 chars), hard cap per chunk. No overlap for V0.
 - Avoid tiny chunks: merge fragments below ~150 words into the previous chunk.
-- Selection: round-robin across sources so diverse chunks are picked, not just the start of the first source. Always include pasted text chunks if present.
-- Cap total context: stop adding chunks once combined size reaches `MAX_CONTEXT_CHARS` (default ~16000 chars).
-- Stream chunk count and approximate per-chunk sizes.
+- Map selection (`select_map_chunks`): pick up to `MAX_MAP_CHUNKS` chunks, source-balanced — pasted text first, then round-robin across sources so the map phase isn't just the start of the first source. Each selected chunk becomes its own LLM call, so this caps total parallel calls/cost rather than packing one big context.
+- Stream selected chunk count and approximate per-chunk sizes.
 
 ## 9. LLM prompting strategy
 
-- System prompt: "You generate quizzes. Return JSON only, no prose, no markdown fences." Describe the exact output schema and the question rules (2–6 options, answer must equal one option value, prefer 4 options, True/False as 2 options, answerable from sources).
-- User prompt: included source chunks (with source labels), plus any user instructions from pasted text, plus a request for N questions (default ~8, adjustable down for thin content).
+- **Map prompt (per chunk):** System prompt — "You generate quizzes. Return JSON only, no prose, no markdown fences." Describe the exact output schema and the question rules (2–6 options, answer must equal one option value, prefer 4 options, True/False as 2 options, answerable from the chunk). User prompt: the single source chunk (with its source label), plus any user instructions from pasted text, plus a request for a small per-chunk quota derived from `num_questions` (at least `MIN_QUESTIONS_PER_CHUNK`, with a `PER_CHUNK_QUESTION_BUFFER` so the reduce step has surplus to pick from). All chunk calls run concurrently, bounded by `MAP_CONCURRENCY`.
+- **Reduce / selector prompt:** a single call given the deduped pool of already-validated questions (with source tags); it returns at most `num_questions` question indices, deduped and source-balanced — it selects, never rewrites. On failure/empty, fall back to a deterministic round-robin trim.
 - Use `response_format={"type":"json_object"}` when the endpoint supports it; otherwise rely on the prompt. Stream tokens as they arrive.
 
 ## 10. JSON validation strategy

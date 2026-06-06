@@ -8,8 +8,10 @@ import type { StreamEvent } from "./types";
 // bypass the proxy and talk to a backend on a different host directly.
 const base = process.env.NEXT_PUBLIC_API_BASE_URL || "";
 
+// Yields parsed NDJSON events: `log`, `final`, and the live-pipeline
+// `chunk`/`progress` events (see lib/types.ts StreamEvent).
 export async function* streamQuiz(
-  body: { urls: string[]; text: string },
+  body: { urls: string[]; text: string; num_questions: number },
   signal?: AbortSignal
 ): AsyncGenerator<StreamEvent> {
   let res: Response;

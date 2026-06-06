@@ -1,11 +1,13 @@
 """OpenAI-compatible LLM client, prompt building, and streaming."""
 
 import asyncio
+import json
+import re
 
 import httpx
 from openai import APIConnectionError, AsyncOpenAI
 
-from . import events
+from . import config, events
 from .config import (
     LLM_CONNECT_TIMEOUT,
     LLM_READ_TIMEOUT,
@@ -60,6 +62,19 @@ Question rules:
 """
 
 
+def _extra_body() -> dict:
+    """num_ctx passthrough for Ollama, set by the startup optimizer.
+
+    Read config.NUM_CTX at call time (it's assigned during startup). Best-effort:
+    Ollama's OpenAI-compatible shim (and olla in front of it) may ignore
+    extra_body options on older versions — if so, the server uses its default
+    num_ctx. Omits the key entirely when unset so non-Ollama endpoints are safe.
+    """
+    if config.NUM_CTX is None:
+        return {}
+    return {"extra_body": {"options": {"num_ctx": config.NUM_CTX}}}
+
+
 def build_messages(chunks, user_instructions, num_questions):
     """Build the chat messages list from selected chunks and instructions."""
     source_blocks = []
@@ -80,8 +95,14 @@ def build_messages(chunks, user_instructions, num_questions):
     ]
 
 
-async def stream_completion(messages, emit):
-    """Stream a chat completion, returning the accumulated content string."""
+async def stream_completion(messages, emit, *, label=None, on_progress=None):
+    """Stream a chat completion, returning the accumulated content string.
+
+    `label` tags the call so concurrent map calls can be told apart.
+    `on_progress` is an optional async callback invoked (throttled) with the
+    cumulative character count of the streamed content so far; the
+    response_format fallback warning is still emitted via `emit`.
+    """
     use_json_format = True
     content_parts = []
 
@@ -90,6 +111,7 @@ async def stream_completion(messages, emit):
             "model": OPENAI_MODEL,
             "messages": messages,
             "stream": True,
+            **_extra_body(),
         }
         if with_json_format:
             kwargs["response_format"] = {"type": "json_object"}
@@ -126,15 +148,10 @@ async def stream_completion(messages, emit):
                 if piece:
                     content_parts.append(piece)
                     chunk_index += 1
-                    # Throttle token logs so we don't spam the stream.
-                    if chunk_index % 20 == 0:
-                        await emit(
-                            events.log(
-                                "LLM chunk received",
-                                chunks=chunk_index,
-                                chars=sum(len(p) for p in content_parts),
-                            )
-                        )
+                    # Fire on the first token (proves liveness / first-token
+                    # latency) then throttle so we don't spam the stream.
+                    if on_progress and (chunk_index == 1 or chunk_index % 20 == 0):
+                        await on_progress(sum(len(p) for p in content_parts))
 
     return "".join(content_parts)
 
@@ -159,7 +176,7 @@ async def repair_json(broken_text, emit):
         },
     ]
 
-    kwargs = {"model": OPENAI_MODEL, "messages": messages}
+    kwargs = {"model": OPENAI_MODEL, "messages": messages, **_extra_body()}
     try:
         response = await _client.chat.completions.create(
             **kwargs, response_format={"type": "json_object"}
@@ -168,3 +185,103 @@ async def repair_json(broken_text, emit):
         response = await _client.chat.completions.create(**kwargs)
 
     return response.choices[0].message.content or ""
+
+
+_SELECTOR_SYSTEM_PROMPT = """You curate a quiz from a candidate pool of questions.
+
+You are given a numbered list of candidate questions, each tagged with its source.
+Select the best set of at most {target_n} questions by INDEX.
+
+Selection rules:
+- Drop semantic duplicates and near-duplicates (questions testing the same fact),
+  keeping only the single best phrasing.
+- Balance coverage ACROSS sources — do not take most questions from one source.
+- Prefer clear, unambiguous, factual questions.
+- Return AT MOST {target_n} indices. Fewer is fine if the pool is small after dedupe.
+
+Return JSON ONLY, no prose, no code fences, exactly this shape:
+{{"keep": [<index>, <index>, ...]}}
+The indices must come from the provided list."""
+
+
+async def select_questions_llm(questions, target_n, emit, on_progress=None):
+    """Reduce call: pick a deduped, source-balanced set of <= target_n questions.
+
+    Returns the list of kept indices (ints) into `questions`, or None if the
+    call/parse fails so the caller can fall back to a deterministic trim. The
+    model only chooses indices — it never rewrites question text.
+
+    Streams (via stream_completion) so first-token latency is visible: a
+    reasoning model's silent "thinking" arrives as streamed tokens, and
+    `on_progress` lets the caller show a heartbeat instead of a frozen UI. The
+    caller bounds the whole call with REDUCE_DEADLINE_SECONDS.
+    """
+    lines = []
+    for i, q in enumerate(questions):
+        source = q.get("_source", "?")
+        lines.append(f"[{i}] (source: {source}) {q.get('question', '')}")
+    listing = "\n".join(lines)
+
+    messages = [
+        {
+            "role": "system",
+            "content": _SELECTOR_SYSTEM_PROMPT.format(target_n=target_n),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Candidate questions ({len(questions)} total). Select at most "
+                f"{target_n} by index:\n\n{listing}"
+            ),
+        },
+    ]
+
+    try:
+        content = await stream_completion(
+            messages, emit, label="reduce-select", on_progress=on_progress
+        )
+    except asyncio.CancelledError:
+        raise  # let the caller's deadline (wait_for) cancel cleanly
+    except Exception as exc:  # noqa: BLE001 - reduce failure is non-fatal
+        await emit(
+            events.log("LLM selection failed", level="warn", error=str(exc))
+        )
+        return None
+
+    # Reasoning models (e.g. qwen3) may emit <think>...</think> and/or prose
+    # around the JSON despite response_format, so strip those and extract the
+    # JSON object rather than parsing the whole string strictly.
+    text = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+    match = re.search(r'\{.*"keep".*\}', text, re.DOTALL)
+    if match:
+        text = match.group(0)
+    try:
+        parsed = json.loads(text)
+        raw_keep = parsed.get("keep", []) if isinstance(parsed, dict) else []
+    except (ValueError, AttributeError):
+        await emit(events.log("LLM selection parse failed", level="warn"))
+        return None
+
+    # Keep only valid, in-range, de-duplicated indices, preserving order.
+    # Accept string-encoded ints (e.g. "3") but reject booleans.
+    seen = set()
+    keep = []
+    for idx in raw_keep:
+        if isinstance(idx, bool):
+            continue
+        try:
+            idx = int(idx)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= idx < len(questions) and idx not in seen:
+            seen.add(idx)
+            keep.append(idx)
+
+    if not keep:
+        await emit(
+            events.log("LLM selection returned no usable indices", level="warn")
+        )
+        return None
+    return keep
