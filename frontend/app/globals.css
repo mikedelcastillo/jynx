@@ -614,3 +614,32 @@ button {
   height: 35vh;
   border-radius: 0;
 }
+
+/* ---------- visualization tabs ---------- */
+.viz-tabs {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 0.6rem;
+}
+
+.viz-tab {
+  padding: 0.4rem 0.9rem;
+  background: #fff;
+  border: 1px solid #d0d0d5;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  color: #555;
+  cursor: pointer;
+}
+
+.viz-tab:hover {
+  border-color: #b5b5be;
+}
+
+.viz-tab.is-active {
+  border-color: #4b4bff;
+  color: #2d2da8;
+  background: #f0f0ff;
+  font-weight: 600;
+}
+

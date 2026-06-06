@@ -3,6 +3,8 @@
 import { useRef, useState } from "react";
 import UrlInput from "@/components/UrlInput";
 import PipelineGraph from "@/components/PipelineGraph";
+import LayeredGraph from "@/components/LayeredGraph";
+import TreeGraph from "@/components/TreeGraph";
 import LogDrawer from "@/components/LogDrawer";
 import Quiz from "@/components/Quiz";
 import RawJsonPanel from "@/components/RawJsonPanel";
@@ -17,6 +19,7 @@ import type {
 } from "@/lib/types";
 
 type View = "input" | "loading" | "result";
+type VizTab = "graph" | "layered" | "tree";
 
 export default function Page() {
   const [view, setView] = useState<View>("input");
@@ -29,6 +32,7 @@ export default function Page() {
   const [sources, setSources] = useState<SourceState[]>([]);
   const [chunks, setChunks] = useState<Record<number, ChunkState>>({});
   const [pipeline, setPipeline] = useState<PipelineState | null>(null);
+  const [vizTab, setVizTab] = useState<VizTab>("graph");
 
   const abortRef = useRef<AbortController | null>(null);
 
@@ -188,10 +192,41 @@ export default function Page() {
   }
 
   if (view === "loading") {
+    const tabs: { id: VizTab; label: string }[] = [
+      { id: "graph", label: "Radial" },
+      { id: "layered", label: "Layered" },
+      { id: "tree", label: "Tree" },
+    ];
     return (
       <div className="view-loading">
+        <div className="viz-tabs" role="tablist">
+          {tabs.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              role="tab"
+              aria-selected={vizTab === t.id}
+              className={`viz-tab${vizTab === t.id ? " is-active" : ""}`}
+              onClick={() => setVizTab(t.id)}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
         <div className="loading-graph">
-          <PipelineGraph sources={sources} chunks={chunks} pipeline={pipeline} />
+          {vizTab === "graph" && (
+            <PipelineGraph
+              sources={sources}
+              chunks={chunks}
+              pipeline={pipeline}
+            />
+          )}
+          {vizTab === "layered" && (
+            <LayeredGraph sources={sources} chunks={chunks} pipeline={pipeline} />
+          )}
+          {vizTab === "tree" && (
+            <TreeGraph sources={sources} chunks={chunks} pipeline={pipeline} />
+          )}
         </div>
         <div className="loading-toolbar">
           <button type="button" onClick={handleClose}>
