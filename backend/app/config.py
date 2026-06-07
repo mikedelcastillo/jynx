@@ -43,10 +43,11 @@ MIN_QUESTIONS_PER_CHUNK = 2  # floor so each chunk yields a useful candidate set
 PER_CHUNK_QUESTION_BUFFER = 1  # over-ask per chunk so the reduce step has room
 MAP_CONCURRENCY = int(os.getenv("MAP_CONCURRENCY", "3"))
 MAX_MAP_CHUNKS = int(os.getenv("MAX_MAP_CHUNKS", "40"))
-# Transient connection drops are common on a busy local cluster (olla/Ollama
-# intermittently refusing or closing streamed connections). Retry a dropped
-# per-chunk call this many times before giving up on that chunk.
-MAP_RETRIES = int(os.getenv("MAP_RETRIES", "1"))
+# Transient failures are common on a busy local cluster: olla/Ollama
+# intermittently refuse or close streamed connections, return 5xx/429 when
+# overloaded, or stall before the first token. Retry a per-chunk call this many
+# times (across all retryable causes — see llm._is_retryable) before giving up.
+MAP_RETRIES = int(os.getenv("MAP_RETRIES", "3"))
 
 # Don't let one slow/stuck chunk hold up the whole quiz. The map phase stops as
 # soon as it has gathered enough questions (num_questions * MAP_SUFFICIENCY) and
@@ -141,3 +142,10 @@ LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "180"))                         # p
 # top-level request field via extra_body; set to "" to omit it (e.g. for
 # endpoints that reject the field).
 LLM_REASONING_EFFORT = os.getenv("LLM_REASONING_EFFORT", "none")
+
+# Full-jitter exponential backoff between per-chunk retries (see llm._retry_sleep):
+# delay = random.uniform(0, min(LLM_BACKOFF_CAP, LLM_BACKOFF_BASE * 2**attempt)).
+# Jitter de-syncs concurrent chunks so they don't re-hit one overloaded node in
+# lockstep; the cap keeps a retry from eating the map deadline.
+LLM_BACKOFF_BASE = float(os.getenv("LLM_BACKOFF_BASE", "0.5"))  # seconds
+LLM_BACKOFF_CAP = float(os.getenv("LLM_BACKOFF_CAP", "6.0"))    # seconds

@@ -6,8 +6,6 @@ import json
 import math
 import re
 
-import httpx
-from openai import APIConnectionError
 from pydantic import ValidationError
 
 from . import events, fetching, llm
@@ -372,16 +370,16 @@ async def _work(req: GenerateRequest, emit):
                         ),
                     )
                     break
-                except (
-                    asyncio.TimeoutError,
-                    httpx.HTTPError,
-                    APIConnectionError,
-                ) as exc:
+                except Exception as exc:  # noqa: BLE001 - CancelledError is a BaseException, not caught
                     last_error = exc
+                    if not llm._is_retryable(exc):
+                        # Permanent (e.g. 4xx) — retrying won't help. Fall
+                        # through to the raw_text-is-None failure path below.
+                        break
                     if attempt < MAP_RETRIES:
                         await emit(
                             events.log(
-                                "Chunk call dropped, retrying",
+                                "Chunk call failed, retrying",
                                 level="warn",
                                 source=source,
                                 attempt=attempt + 1,
@@ -397,7 +395,7 @@ async def _work(req: GenerateRequest, emit):
                                 error=str(exc),
                             )
                         )
-                        await asyncio.sleep(0.5 * (attempt + 1))
+                        await asyncio.sleep(llm._retry_sleep(attempt))
         if raw_text is None:
             conn_failures += 1
             running -= 1
