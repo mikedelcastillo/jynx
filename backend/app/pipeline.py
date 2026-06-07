@@ -14,6 +14,7 @@ from .config import (
     DEDUPE_SIMILARITY_THRESHOLD,
     MAP_CONCURRENCY,
     MAP_DEADLINE_SECONDS,
+    MAP_FIRST_CONTENT_DEADLINE,
     MAP_RETRIES,
     MAP_SUFFICIENCY,
     MAX_MAP_CHUNKS,
@@ -320,6 +321,11 @@ async def _work(req: GenerateRequest, emit):
     running = 0
     failed = 0
     questions_total = 0
+    # Flips True as soon as ANY chunk streams its first token — content OR a
+    # reasoning-model's thinking token (both mean the backend is working). Used
+    # to fail fast when the backend accepts requests but serves nothing at all
+    # (queued/wedged) — see the first-activity guard in the collection loop.
+    activity_seen = False
 
     async def emit_map_progress():
         await emit(
@@ -355,6 +361,14 @@ async def _work(req: GenerateRequest, emit):
         messages = llm.build_messages([chunk], "", per_chunk_n)
         raw_text = None
         last_error = None
+        async def _on_progress(c):
+            # Fired on the first reasoning token (c == 0) and on content tokens
+            # (c > 0). Either way the backend is actively working, so clear the
+            # no-activity guard; only a backend that streams nothing leaves it set.
+            nonlocal activity_seen
+            activity_seen = True
+            await emit(events.chunk(chunk_id, source, "running", chars=c))
+
         async with sem:
             running += 1
             await emit(events.chunk(chunk_id, source, "running", chars=0))
@@ -365,9 +379,7 @@ async def _work(req: GenerateRequest, emit):
                         messages,
                         emit,
                         label=source,
-                        on_progress=lambda c: emit(
-                            events.chunk(chunk_id, source, "running", chars=c)
-                        ),
+                        on_progress=_on_progress,
                     )
                     break
                 except Exception as exc:  # noqa: BLE001 - CancelledError is a BaseException, not caught
@@ -466,6 +478,14 @@ async def _work(req: GenerateRequest, emit):
         questions = normalized["data"]["questions"]
         for q in questions:
             q["_source"] = source
+        if not questions:
+            # Parsed fine but the model produced no usable question. Non-fatal:
+            # accept the empty result (other chunks cover it) rather than retry.
+            await emit(
+                events.log(
+                    "Chunk yielded no questions", level="warn", source=source
+                )
+            )
         running -= 1
         done += 1
         questions_total += len(questions)
@@ -478,7 +498,13 @@ async def _work(req: GenerateRequest, emit):
     # MAP_SUFFICIENCY) or the map deadline passes, then cancel the rest.
     threshold = max(num_questions, math.ceil(num_questions * MAP_SUFFICIENCY))
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + MAP_DEADLINE_SECONDS
+    map_start = loop.time()
+    deadline = map_start + MAP_DEADLINE_SECONDS
+    # If the backend accepts our requests but streams nothing at all (every
+    # chunk queued/wedged behind a busy, serialized cluster), don't grind to the
+    # full map deadline — give up once no chunk has produced ANY token (content
+    # or reasoning) within this window and fail fast with a clear message.
+    first_activity_deadline = map_start + MAP_FIRST_CONTENT_DEADLINE
 
     task_meta = {}
     for i, c in enumerate(map_chunks):
@@ -486,16 +512,25 @@ async def _work(req: GenerateRequest, emit):
         task_meta[task] = (i, c["source"])
 
     pool: list = []
+    no_content_stop = False
     pending = set(task_meta)
     while pending:
-        remaining = deadline - loop.time()
+        now = loop.time()
+        if not activity_seen and now >= first_activity_deadline:
+            no_content_stop = True
+            break  # backend produced nothing in time — fail fast
+        remaining = deadline - now
         if remaining <= 0:
             break  # map deadline reached
+        # While nothing has streamed yet, wake up at the first-activity deadline
+        # so the guard above fires promptly instead of waiting out the deadline.
+        if not activity_seen:
+            remaining = min(remaining, first_activity_deadline - now)
         completed, pending = await asyncio.wait(
             pending, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
         )
         if not completed:
-            break  # timed out waiting — deadline reached
+            continue  # re-evaluate guards/deadline at the top of the loop
         for task in completed:
             try:
                 pool.extend(task.result())
@@ -509,11 +544,12 @@ async def _work(req: GenerateRequest, emit):
             break
 
     if pending:
-        reason = (
-            "enough questions gathered"
-            if len(pool) >= threshold
-            else "map deadline reached"
-        )
+        if len(pool) >= threshold:
+            reason = "enough questions gathered"
+        elif no_content_stop:
+            reason = "backend served no content in time"
+        else:
+            reason = "map deadline reached"
         await emit(
             events.log(
                 "Stopping remaining chunks",
@@ -542,7 +578,13 @@ async def _work(req: GenerateRequest, emit):
 
     # Fail only if NO chunk yielded any valid question.
     if not pool:
-        if conn_failures >= len(map_chunks):
+        if no_content_stop:
+            message = (
+                "The model endpoint accepted the request but produced no "
+                "output in time — it may be overloaded or queued behind other "
+                "work. Please try again."
+            )
+        elif conn_failures >= len(map_chunks):
             message = (
                 "The model endpoint dropped every request — it may be "
                 "unreachable or overloaded. Please try again."
