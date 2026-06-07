@@ -54,7 +54,11 @@ MAP_RETRIES = int(os.getenv("MAP_RETRIES", "1"))
 # cancels stragglers even if that threshold isn't reached. The reduce step then
 # dedupes/selects from whatever was collected.
 MAP_SUFFICIENCY = float(os.getenv("MAP_SUFFICIENCY", "1.5"))
-MAP_DEADLINE_SECONDS = float(os.getenv("MAP_DEADLINE_SECONDS", "90"))
+# Sized for the streaming budget above: a healthy chunk can need ~90s (first
+# token) + ~60s (generation) ≈ 150s, and an abandoned first-token stall trips at
+# ~90s before its retry. 240s lets a chunk survive one stall and still land
+# within the deadline; MAP_CONCURRENCY and the sufficiency threshold cap latency.
+MAP_DEADLINE_SECONDS = float(os.getenv("MAP_DEADLINE_SECONDS", "240"))
 
 # The reduce LLM "selector" is a best-effort nicety: it asks the model to pick
 # the best N-of-M questions by index. A slow reasoning model (e.g. qwen3) never
@@ -117,9 +121,16 @@ USER_AGENT = os.getenv(
 )
 
 # LLM call timeouts (seconds). REQUEST_TIMEOUT above is for fetching only.
-LLM_CONNECT_TIMEOUT = 10  # establishing the connection
-LLM_READ_TIMEOUT = 60  # max gap waiting for the next/first streamed token
-LLM_TIMEOUT = 120  # overall wall-clock cap for one generation
+# Tuned for a low-perf, low-availability Ollama cluster behind olla. On this
+# hardware the FIRST token legitimately takes over a minute (cold model load /
+# reasoning); a long gap AFTER tokens start, or no first token well past that,
+# means the model has stopped -> abandon fast and retry (olla rebalances). The
+# first-token vs inter-token split is enforced by llm.stream_completion's
+# watchdog; LLM_TIMEOUT is the per-attempt overall backstop.
+LLM_CONNECT_TIMEOUT = float(os.getenv("LLM_CONNECT_TIMEOUT", "8"))           # establish connection
+LLM_FIRST_TOKEN_TIMEOUT = float(os.getenv("LLM_FIRST_TOKEN_TIMEOUT", "90"))  # long leash: model load/think
+LLM_INTERTOKEN_TIMEOUT = float(os.getenv("LLM_INTERTOKEN_TIMEOUT", "30"))    # gap between tokens once flowing
+LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "180"))                         # per-attempt overall backstop
 
 # Reasoning-model control. Models like qwen3 emit a long chain-of-thought (in a
 # separate `reasoning` stream field, with content="" the whole time) before the
