@@ -60,6 +60,12 @@ MAP_SUFFICIENCY = float(os.getenv("MAP_SUFFICIENCY", "1.5"))
 # ~90s before its retry. 240s lets a chunk survive one stall and still land
 # within the deadline; MAP_CONCURRENCY and the sufficiency threshold cap latency.
 MAP_DEADLINE_SECONDS = float(os.getenv("MAP_DEADLINE_SECONDS", "240"))
+# Fail-fast backstop: if the backend accepts our requests but streams NO content
+# at all within this window (every chunk queued/wedged behind a busy serialized
+# cluster), give up instead of grinding to MAP_DEADLINE_SECONDS. Kept just above
+# LLM_FIRST_TOKEN_TIMEOUT so a legitimately slow first token still counts as
+# progress, but a truly silent backend fails in ~a minute and a half.
+MAP_FIRST_CONTENT_DEADLINE = float(os.getenv("MAP_FIRST_CONTENT_DEADLINE", "105"))
 
 # The reduce LLM "selector" is a best-effort nicety: it asks the model to pick
 # the best N-of-M questions by index. A slow reasoning model (e.g. qwen3) never
