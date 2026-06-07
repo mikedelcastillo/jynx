@@ -27,8 +27,9 @@ def chunk(id, source, state, **fields):
 def progress(phase, **fields):
     """Return a `progress` event: a pipeline stage/aggregate snapshot.
 
-    `phase` is one of fetch|chunk|map|reduce|done. Extra fields carry the
-    per-phase payload (e.g. source/state for fetch; total/done/running for map).
+    `phase` is one of fetch|chunk|map|reduce|crawl|done. Extra fields carry the
+    per-phase payload (e.g. source/state for fetch; total/done/running for map;
+    depth/max_depth/fetched/cap for crawl).
     """
     return {"type": "progress", "phase": phase, **fields}
 

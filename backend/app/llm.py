@@ -9,6 +9,7 @@ from openai import APIConnectionError, AsyncOpenAI
 
 from . import config, events
 from .config import (
+    CRAWL_RELEVANCE_TEMPERATURE,
     LLM_CONNECT_TIMEOUT,
     LLM_READ_TIMEOUT,
     LLM_REASONING_EFFORT,
@@ -106,13 +107,15 @@ def build_messages(chunks, user_instructions, num_questions):
     ]
 
 
-async def stream_completion(messages, emit, *, label=None, on_progress=None):
+async def stream_completion(messages, emit, *, label=None, on_progress=None, temperature=None):
     """Stream a chat completion, returning the accumulated content string.
 
     `label` tags the call so concurrent map calls can be told apart.
     `on_progress` is an optional async callback invoked (throttled) with the
     cumulative character count of the streamed content so far; the
     response_format fallback warning is still emitted via `emit`.
+    `temperature`, when set, is sent through — selection/ranking calls use a low
+    value for consistent, decisive picks; omitted leaves the server default.
     """
     use_json_format = True
     content_parts = []
@@ -124,6 +127,8 @@ async def stream_completion(messages, emit, *, label=None, on_progress=None):
             "stream": True,
             **_extra_body(),
         }
+        if temperature is not None:
+            kwargs["temperature"] = temperature
         if with_json_format:
             kwargs["response_format"] = {"type": "json_object"}
         return await _client.chat.completions.create(**kwargs)
@@ -215,9 +220,32 @@ Return JSON ONLY, no prose, no code fences, exactly this shape:
 The indices must come from the provided list."""
 
 
-async def select_questions_llm(questions, target_n, emit, on_progress=None):
-    """Reduce call: pick a deduped, source-balanced set of <= target_n questions.
+_SELECTOR_SYSTEM_PROMPT_TOPIC = """You curate a quiz from a candidate pool of \
+questions gathered by crawling pages about a specific topic.
 
+You are given the QUIZ TOPIC and a numbered list of candidate questions, each
+tagged with its source. Select at most {target_n} questions by INDEX and RANK
+them by relevance to the topic.
+
+Selection rules:
+- Rank by how directly each question tests knowledge of the QUIZ TOPIC. Return
+  the indices ordered MOST RELEVANT FIRST.
+- Drop semantic duplicates and near-duplicates (questions testing the same fact),
+  keeping only the single best phrasing.
+- Prefer clear, unambiguous, factual questions.
+- Drop questions that are off-topic relative to the QUIZ TOPIC.
+- Return AT MOST {target_n} indices. Fewer is fine if few are on-topic after dedupe.
+
+Return JSON ONLY, no prose, no code fences, exactly this shape:
+{{"keep": [<index>, <index>, ...]}}
+Order the indices most-relevant-first. They must come from the provided list."""
+
+
+async def select_questions_llm(questions, target_n, emit, *, seed_topic=None, on_progress=None):
+    """Reduce call: pick a deduped set of <= target_n questions by index.
+
+    When `seed_topic` is given, the set is RANKED by relevance to that topic and
+    returned most-relevant-first; otherwise it is deduped and source-balanced.
     Returns the list of kept indices (ints) into `questions`, or None if the
     call/parse fails so the caller can fall back to a deterministic trim. The
     model only chooses indices — it never rewrites question text.
@@ -225,7 +253,7 @@ async def select_questions_llm(questions, target_n, emit, on_progress=None):
     Streams (via stream_completion) so first-token latency is visible: a
     reasoning model's silent "thinking" arrives as streamed tokens, and
     `on_progress` lets the caller show a heartbeat instead of a frozen UI. The
-    caller bounds the whole call with REDUCE_DEADLINE_SECONDS.
+    caller bounds the whole call with a reduce deadline.
     """
     lines = []
     for i, q in enumerate(questions):
@@ -233,18 +261,23 @@ async def select_questions_llm(questions, target_n, emit, on_progress=None):
         lines.append(f"[{i}] (source: {source}) {q.get('question', '')}")
     listing = "\n".join(lines)
 
+    if seed_topic:
+        system_content = _SELECTOR_SYSTEM_PROMPT_TOPIC.format(target_n=target_n)
+        user_content = (
+            f"QUIZ TOPIC:\n{seed_topic}\n\n"
+            f"Candidate questions ({len(questions)} total). Select and rank at "
+            f"most {target_n} by index:\n\n{listing}"
+        )
+    else:
+        system_content = _SELECTOR_SYSTEM_PROMPT.format(target_n=target_n)
+        user_content = (
+            f"Candidate questions ({len(questions)} total). Select at most "
+            f"{target_n} by index:\n\n{listing}"
+        )
+
     messages = [
-        {
-            "role": "system",
-            "content": _SELECTOR_SYSTEM_PROMPT.format(target_n=target_n),
-        },
-        {
-            "role": "user",
-            "content": (
-                f"Candidate questions ({len(questions)} total). Select at most "
-                f"{target_n} by index:\n\n{listing}"
-            ),
-        },
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": user_content},
     ]
 
     try:
@@ -296,3 +329,110 @@ async def select_questions_llm(questions, target_n, emit, on_progress=None):
         )
         return None
     return keep
+
+
+_LINK_SELECTOR_SYSTEM_PROMPT = """You select which links are worth following to \
+deepen a quiz's source material.
+
+You are given:
+1. The QUIZ TOPIC (what the quiz is fundamentally about).
+2. A summary of the CURRENT PAGE you are on.
+3. A numbered list of candidate links (URL + visible link text) found on that page.
+
+Select AT MOST {max_n} links by INDEX that are most likely to contain \
+substantive content ON THE QUIZ TOPIC.
+
+Selection rules:
+- Stay on-topic: judge each link against the QUIZ TOPIC, not just the current
+  page, so the crawl does not drift into unrelated subjects.
+- Prefer links to substantive articles/content over navigation, login, share,
+  legal, tag, category, or index/listing links.
+- It is fine to follow off-site links if they are clearly on-topic.
+- Select the relevant links; return an empty list only if none are relevant.
+
+Return JSON ONLY, no prose, no code fences, exactly this shape:
+{{"keep": [<index>, <index>, ...]}}
+The indices must come from the provided list."""
+
+
+async def select_relevant_links_llm(
+    seed_topic, page_summary, candidates, max_n, emit, *, label=None, on_progress=None
+):
+    """Pick up to max_n on-topic links by index from `candidates`.
+
+    `candidates` is a list of {"url", "text"}. Grounds the judgment on BOTH
+    seed_topic (drift resistance across levels) and page_summary (local
+    relevance). Returns a list of kept indices into `candidates`, or None on any
+    failure so the caller skips crawling that page — link selection is never
+    fatal. The model only chooses indices; it never rewrites or invents URLs.
+
+    Streams (via stream_completion) so a slow reasoning model's progress is
+    visible; the caller bounds the whole call with CRAWL_RELEVANCE_DEADLINE_SECONDS.
+    """
+    lines = [
+        f"[{i}] {c.get('text') or '(no text)'} -> {c['url']}"
+        for i, c in enumerate(candidates)
+    ]
+    listing = "\n".join(lines)
+
+    messages = [
+        {
+            "role": "system",
+            "content": _LINK_SELECTOR_SYSTEM_PROMPT.format(max_n=max_n),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"QUIZ TOPIC:\n{seed_topic}\n\n"
+                f"CURRENT PAGE SUMMARY:\n{page_summary}\n\n"
+                f"Candidate links ({len(candidates)} total). "
+                f"Select at most {max_n} by index:\n\n{listing}"
+            ),
+        },
+    ]
+
+    try:
+        content = await stream_completion(
+            messages,
+            emit,
+            label=label or "crawl-select",
+            on_progress=on_progress,
+            temperature=CRAWL_RELEVANCE_TEMPERATURE,
+        )
+    except asyncio.CancelledError:
+        raise  # let the caller's deadline (wait_for) cancel cleanly
+    except Exception as exc:  # noqa: BLE001 - crawl selection is non-fatal
+        await emit(
+            events.log("Link selection failed", level="warn", error=str(exc))
+        )
+        return None
+
+    # Same robust parse as select_questions_llm: strip <think>/fences and pull
+    # out the {"keep": [...]} object rather than parsing the whole string.
+    text = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+    match = re.search(r'\{.*"keep".*\}', text, re.DOTALL)
+    if match:
+        text = match.group(0)
+    try:
+        parsed = json.loads(text)
+        raw_keep = parsed.get("keep", []) if isinstance(parsed, dict) else []
+    except (ValueError, AttributeError):
+        await emit(events.log("Link selection parse failed", level="warn"))
+        return None
+
+    seen = set()
+    keep = []
+    for idx in raw_keep:
+        if isinstance(idx, bool):
+            continue
+        try:
+            idx = int(idx)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= idx < len(candidates) and idx not in seen:
+            seen.add(idx)
+            keep.append(idx)
+
+    return keep[:max_n] or None

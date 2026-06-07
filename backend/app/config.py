@@ -33,7 +33,7 @@ TARGET_CHUNK_WORDS = 900  # each chunk is one parallel LLM call's source materia
 # range (see models.GenerateRequest) so an out-of-range value never 422s.
 DEFAULT_NUM_QUESTIONS = 10
 MIN_NUM_QUESTIONS = 1
-MAX_NUM_QUESTIONS = 30
+MAX_NUM_QUESTIONS = 50
 
 # Parallel fan-out (map) tuning. Each ~TARGET_CHUNK_WORDS chunk becomes its own
 # LLM call; calls run concurrently and `olla` load-balances them across the
@@ -68,6 +68,10 @@ REDUCE_LLM_SELECTION_ENABLED = os.getenv(
 # deterministic balanced trim. Kept short — the call now streams, so progress is
 # visible while it runs, and a model that can't pick fast should yield quickly.
 REDUCE_DEADLINE_SECONDS = float(os.getenv("REDUCE_DEADLINE_SECONDS", "8"))
+# When crawling, reduce ranks a much larger pool (every crawled page contributes
+# questions) by relevance to the seed topic, so it needs more headroom than the
+# single-page default before falling back to the (unranked) balanced trim.
+CRAWL_REDUCE_DEADLINE_SECONDS = float(os.getenv("CRAWL_REDUCE_DEADLINE_SECONDS", "30"))
 
 # difflib SequenceMatcher ratio above which two questions are near-duplicates.
 DEDUPE_SIMILARITY_THRESHOLD = 0.9
@@ -130,3 +134,49 @@ LLM_TIMEOUT = 120  # overall wall-clock cap for one generation
 # top-level request field via extra_body; set to "" to omit it (e.g. for
 # endpoints that reject the field).
 LLM_REASONING_EFFORT = os.getenv("LLM_REASONING_EFFORT", "none")
+
+# --- Link crawling (see app/pipeline.py crawl loop) ------------------------
+# crawl_depth (per-request, clamped in models.GenerateRequest): 0 = no crawling
+# (current behavior); N = recursively follow the most relevant links up to N
+# levels deep. Discovered pages become additional sources feeding the existing
+# chunk->map->reduce pipeline unchanged. The relevance LLM auto-queues links;
+# there is no human-in-the-loop. SSRF validate_url() still gates every fetch.
+DEFAULT_CRAWL_DEPTH = int(os.getenv("DEFAULT_CRAWL_DEPTH", "1"))
+MIN_CRAWL_DEPTH = int(os.getenv("MIN_CRAWL_DEPTH", "0"))
+MAX_CRAWL_DEPTH = int(os.getenv("MAX_CRAWL_DEPTH", "5"))
+
+# Fan-out: the relevance LLM auto-queues at most this many links per page for
+# the next level (analogous to MAX_MAP_CHUNKS bounding the map fan-out).
+CRAWL_MAX_LINKS_PER_PAGE = int(os.getenv("CRAWL_MAX_LINKS_PER_PAGE", "4"))
+
+# How many candidate anchors to offer the relevance LLM per page. Caps the
+# selector prompt size on link-heavy pages (nav/footer/sidebar bloat).
+CRAWL_MAX_CANDIDATES_PER_PAGE = int(os.getenv("CRAWL_MAX_CANDIDATES_PER_PAGE", "40"))
+
+# Hard safety net: total pages fetched by crawling across ALL levels (excludes
+# the original seed URLs). Bounds blast radius regardless of depth/fan-out.
+CRAWL_MAX_TOTAL_PAGES = int(os.getenv("CRAWL_MAX_TOTAL_PAGES", "20"))
+
+# Per-page relevance-LLM wall-clock cap. Like REDUCE_DEADLINE_SECONDS: a slow
+# model that can't pick fast yields, and that page contributes no new links.
+CRAWL_RELEVANCE_DEADLINE_SECONDS = float(
+    os.getenv("CRAWL_RELEVANCE_DEADLINE_SECONDS", "15")
+)
+
+# The relevance selector is a small model that nondeterministically returns an
+# empty pick (~1 in 6) even when good links exist. An empty pick on a lone seed
+# page would silently abort the entire crawl, so retry an empty-or-failed pick
+# this many extra times before giving up on a page (like MAP_RETRIES for chunks).
+CRAWL_RELEVANCE_RETRIES = int(os.getenv("CRAWL_RELEVANCE_RETRIES", "3"))
+
+# Link selection is a near-deterministic pick, but at the server's default
+# sampling temperature a small model nondeterministically returns an empty pick.
+# A low temperature makes it consistent and decisive (cuts the empty rate).
+CRAWL_RELEVANCE_TEMPERATURE = float(os.getenv("CRAWL_RELEVANCE_TEMPERATURE", "0.1"))
+
+# Chars of page text fed to the relevance LLM as grounding context (relevance
+# judging needs a gist, not the full article).
+CRAWL_RELEVANCE_CONTEXT_CHARS = int(os.getenv("CRAWL_RELEVANCE_CONTEXT_CHARS", "2000"))
+
+# Chars of the seed topic summary used to resist topic drift across levels.
+CRAWL_SEED_TOPIC_CHARS = int(os.getenv("CRAWL_SEED_TOPIC_CHARS", "1500"))

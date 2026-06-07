@@ -26,6 +26,7 @@ export default function Page() {
   const [urls, setUrls] = useState<string[]>([]);
   const [text, setText] = useState("");
   const [count, setCount] = useState(10);
+  const [depth, setDepth] = useState(1);
   const [logs, setLogs] = useState<LogEvent[]>([]);
   const [result, setResult] = useState<QuizResult | null>(null);
   const [showRaw, setShowRaw] = useState(false);
@@ -53,7 +54,7 @@ export default function Page() {
 
     try {
       for await (const event of streamQuiz(
-        { urls: runUrls, text: runText, num_questions: count },
+        { urls: runUrls, text: runText, num_questions: count, crawl_depth: depth },
         controller.signal
       )) {
         if (event.type === "log") {
@@ -172,12 +173,29 @@ export default function Page() {
           className="text-area"
           value={count}
           min={1}
-          max={30}
+          max={50}
           onChange={(e) => {
             const n = parseInt(e.target.value, 10);
-            setCount(Number.isNaN(n) ? 10 : Math.max(1, Math.min(30, n)));
+            setCount(Number.isNaN(n) ? 10 : Math.max(1, Math.min(50, n)));
           }}
         />
+
+        <label className="field-label">Link crawl depth</label>
+        <select
+          className="select"
+          value={depth}
+          onChange={(e) => setDepth(parseInt(e.target.value, 10))}
+        >
+          {[0, 1, 2, 3, 4, 5].map((d) => (
+            <option key={d} value={d}>
+              {d}
+            </option>
+          ))}
+        </select>
+        <p className="field-hint">
+          Follow relevant links found on the page, this many levels deep. 0 =
+          don&apos;t follow links.
+        </p>
 
         <button
           type="button"
