@@ -120,3 +120,13 @@ USER_AGENT = os.getenv(
 LLM_CONNECT_TIMEOUT = 10  # establishing the connection
 LLM_READ_TIMEOUT = 60  # max gap waiting for the next/first streamed token
 LLM_TIMEOUT = 120  # overall wall-clock cap for one generation
+
+# Reasoning-model control. Models like qwen3 emit a long chain-of-thought (in a
+# separate `reasoning` stream field, with content="" the whole time) before the
+# answer — wasting GPU time on a task that needs none. The quiz task is JSON
+# extraction, so we ask the endpoint to skip thinking. `reasoning_effort` is the
+# only lever Ollama/olla actually honor here (think:false,
+# chat_template_kwargs.enable_thinking, and /no_think are all ignored). Sent as a
+# top-level request field via extra_body; set to "" to omit it (e.g. for
+# endpoints that reject the field).
+LLM_REASONING_EFFORT = os.getenv("LLM_REASONING_EFFORT", "none")

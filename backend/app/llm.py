@@ -11,6 +11,7 @@ from . import config, events
 from .config import (
     LLM_CONNECT_TIMEOUT,
     LLM_READ_TIMEOUT,
+    LLM_REASONING_EFFORT,
     LLM_TIMEOUT,
     OPENAI_API_KEY,
     OPENAI_BASE_URL,
@@ -63,16 +64,26 @@ Question rules:
 
 
 def _extra_body() -> dict:
-    """num_ctx passthrough for Ollama, set by the startup optimizer.
+    """Extra request-body fields for Ollama: num_ctx and reasoning_effort.
 
-    Read config.NUM_CTX at call time (it's assigned during startup). Best-effort:
-    Ollama's OpenAI-compatible shim (and olla in front of it) may ignore
-    extra_body options on older versions — if so, the server uses its default
-    num_ctx. Omits the key entirely when unset so non-Ollama endpoints are safe.
+    Read config values at call time (NUM_CTX is assigned during startup).
+    Best-effort: Ollama's OpenAI-compatible shim (and olla in front of it) may
+    ignore some of these — if so, the server uses its defaults. Each key is
+    omitted when unset so non-Ollama endpoints stay safe.
+
+    - num_ctx: allocate the model's full context window (set by the optimizer).
+    - reasoning_effort: skip chain-of-thought for the JSON-extraction task. A
+      reasoning model otherwise streams a long `reasoning` phase with empty
+      `content`, wasting GPU time. "none" makes the answer stream from token one.
     """
-    if config.NUM_CTX is None:
+    extra: dict = {}
+    if config.NUM_CTX is not None:
+        extra["options"] = {"num_ctx": config.NUM_CTX}
+    if LLM_REASONING_EFFORT:
+        extra["reasoning_effort"] = LLM_REASONING_EFFORT
+    if not extra:
         return {}
-    return {"extra_body": {"options": {"num_ctx": config.NUM_CTX}}}
+    return {"extra_body": extra}
 
 
 def build_messages(chunks, user_instructions, num_questions):
