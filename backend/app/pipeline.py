@@ -10,9 +10,17 @@ import httpx
 from openai import APIConnectionError
 from pydantic import ValidationError
 
-from . import events, fetching, llm
+from . import events, fetching, links, llm
 from .chunking import chunk_sources, select_map_chunks
 from .config import (
+    CRAWL_MAX_CANDIDATES_PER_PAGE,
+    CRAWL_MAX_LINKS_PER_PAGE,
+    CRAWL_MAX_TOTAL_PAGES,
+    CRAWL_RELEVANCE_CONTEXT_CHARS,
+    CRAWL_REDUCE_DEADLINE_SECONDS,
+    CRAWL_RELEVANCE_DEADLINE_SECONDS,
+    CRAWL_RELEVANCE_RETRIES,
+    CRAWL_SEED_TOPIC_CHARS,
     DEDUPE_SIMILARITY_THRESHOLD,
     MAP_CONCURRENCY,
     MAP_DEADLINE_SECONDS,
@@ -195,6 +203,186 @@ def _balanced_trim(questions: list, n: int) -> list:
     return trimmed
 
 
+def _derive_seed_topic(sources: list) -> str:
+    """Cheap, deterministic seed topic for grounding crawl relevance.
+
+    No extra LLM call: combine the source labels with the leading text of the
+    first source (the lede usually states the subject). Good enough to anchor
+    the relevance LLM against topic drift across levels; a clean swap point if
+    an LLM-generated topic summary is ever wanted.
+    """
+    labels = ", ".join(s["label"] for s in sources)
+    lead = sources[0]["text"].strip()[:CRAWL_SEED_TOPIC_CHARS] if sources else ""
+    return f"Sources: {labels}\n\nLeading content:\n{lead}"
+
+
+async def _crawl_links(req, sources, seed_pages, emit, fetch_and_extract, seed_topic):
+    """BFS-crawl relevant links up to req.crawl_depth, appending new sources.
+
+    For each level: scan every frontier page's links, drop already-visited and
+    SSRF-invalid ones, let the relevance LLM pick the top-N on-topic links per
+    page, dedupe globally, then fetch the survivors (bounded by a global page
+    cap) and carry them into the next level. Crawled pages are appended to
+    `sources` as {"label","text"} so they feed the existing chunk->map->reduce
+    flow unchanged. `seed_topic` (the original seed topic) grounds relevance.
+
+    Entirely non-fatal and bounded: per-page fan-out (CRAWL_MAX_LINKS_PER_PAGE),
+    a global page cap (CRAWL_MAX_TOTAL_PAGES), and a per-call deadline
+    (CRAWL_RELEVANCE_DEADLINE_SECONDS). Emits `crawl` progress + log events only
+    — never a `final`.
+    """
+    # Pre-seed visited with every seed URL we attempted so we never re-fetch
+    # them (re-trying a blocked/empty seed is pointless).
+    visited = {links.normalize_url(u) for u in req.urls}
+    sem = asyncio.Semaphore(MAP_CONCURRENCY)
+    pages_crawled = 0  # pages fetched BY crawling (excludes the seed URLs)
+
+    # Frontier: pages whose links we scan this level (each carries raw html).
+    frontier = list(seed_pages)
+
+    await emit(
+        events.progress(
+            "crawl",
+            depth=0,
+            max_depth=req.crawl_depth,
+            fetched=0,
+            cap=CRAWL_MAX_TOTAL_PAGES,
+        )
+    )
+
+    for level in range(req.crawl_depth):
+        if not frontier or pages_crawled >= CRAWL_MAX_TOTAL_PAGES:
+            break
+
+        async def _links_from_page(page):
+            """Extract, SSRF-filter, and LLM-rank one page's links -> [urls]."""
+            candidates = links.extract_links(page["html"], page["label"])
+            eligible = []
+            for c in candidates:
+                if links.normalize_url(c["url"]) in visited:
+                    continue
+                ok, _ = fetching.validate_url(c["url"])
+                if not ok:
+                    continue
+                eligible.append(c)
+                if len(eligible) >= CRAWL_MAX_CANDIDATES_PER_PAGE:
+                    break
+            if not eligible:
+                return []
+            # The selector nondeterministically returns an empty pick (and may
+            # transiently drop), which on a lone seed page would silently abort
+            # the whole crawl. Retry empty/failed picks before giving up, so a
+            # single whiff doesn't kill the crawl (mirrors the map-phase retry).
+            keep = None
+            last_error = None
+            async with sem:
+                for attempt in range(CRAWL_RELEVANCE_RETRIES + 1):
+                    try:
+                        keep = await asyncio.wait_for(
+                            llm.select_relevant_links_llm(
+                                seed_topic,
+                                page["text"][:CRAWL_RELEVANCE_CONTEXT_CHARS],
+                                eligible,
+                                CRAWL_MAX_LINKS_PER_PAGE,
+                                emit,
+                                label=page["label"],
+                            ),
+                            timeout=CRAWL_RELEVANCE_DEADLINE_SECONDS,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - non-fatal
+                        last_error = exc
+                        keep = None
+                    if keep:
+                        break
+                    if attempt < CRAWL_RELEVANCE_RETRIES:
+                        await emit(
+                            events.log(
+                                "Link scoring empty, retrying",
+                                level="warn",
+                                url=page["label"],
+                                attempt=attempt + 1,
+                                error=str(last_error) if last_error else None,
+                            )
+                        )
+            if not keep:
+                await emit(
+                    events.log(
+                        "Link scoring yielded no links",
+                        level="warn",
+                        url=page["label"],
+                        error=str(last_error) if last_error else None,
+                    )
+                )
+                return []
+            return [eligible[i]["url"] for i in keep]
+
+        results = await asyncio.gather(
+            *[_links_from_page(p) for p in frontier], return_exceptions=True
+        )
+
+        # Collect survivors: dedupe vs visited and each other, mark visited.
+        chosen = []
+        for r in results:
+            if isinstance(r, Exception):
+                continue
+            for u in r:
+                nu = links.normalize_url(u)
+                if nu in visited:
+                    continue
+                visited.add(nu)
+                chosen.append(u)
+        if not chosen:
+            break
+
+        # Enforce the global page cap by only fetching what budget remains.
+        remaining = CRAWL_MAX_TOTAL_PAGES - pages_crawled
+        if remaining <= 0:
+            break
+        chosen = chosen[:remaining]
+
+        await emit(
+            events.log(
+                "Links queued for crawl",
+                level="info",
+                depth=level + 1,
+                count=len(chosen),
+            )
+        )
+
+        # Fetch the chosen pages for this level concurrently. Each failure just
+        # drops that page (fetch_and_extract returns None / may raise).
+        fetch_results = await asyncio.gather(
+            *[fetch_and_extract(u) for u in chosen], return_exceptions=True
+        )
+        new_frontier = []
+        for res in fetch_results:
+            if isinstance(res, Exception) or res is None:
+                continue
+            pages_crawled += 1
+            sources.append({"label": res["label"], "text": res["text"]})
+            new_frontier.append(res)
+            await emit(
+                events.progress(
+                    "crawl",
+                    depth=level + 1,
+                    max_depth=req.crawl_depth,
+                    fetched=pages_crawled,
+                    cap=CRAWL_MAX_TOTAL_PAGES,
+                )
+            )
+
+        frontier = new_frontier
+
+    await emit(
+        events.log(
+            "Crawl complete",
+            level="success",
+            pages_crawled=pages_crawled,
+            total_sources=len(sources),
+        )
+    )
+
+
 async def _work(req: GenerateRequest, emit):
     """Run the full pipeline, emitting events. Returns the final QuizResult dict."""
     await emit(
@@ -207,9 +395,17 @@ async def _work(req: GenerateRequest, emit):
     )
 
     sources = []
+    # Successfully-fetched URL pages, each carrying raw html for crawling. Only
+    # URL sources (not pasted text) can seed the crawl frontier.
+    fetched_pages = []
 
-    # Step 2: process each URL.
-    for url in req.urls:
+    async def _fetch_and_extract(url):
+        """Validate, fetch, and extract one URL, emitting fetch/extraction events.
+
+        Returns {"label", "text", "html"} when the page yields enough usable
+        text (>= MIN_EXTRACTED_CHARS), else None. Shared by the seed loop and
+        the crawl loop so crawled pages get identical UI treatment.
+        """
         await emit(events.log("Validating URL", url=url))
         await emit(events.progress("fetch", source=url, state="fetching"))
         ok, reason = fetching.validate_url(url)
@@ -218,12 +414,12 @@ async def _work(req: GenerateRequest, emit):
                 events.log("Blocked URL", level="warn", url=url, reason=reason)
             )
             await emit(events.progress("fetch", source=url, state="blocked"))
-            continue
+            return None
 
         fetched = await fetching.fetch_url(url, emit)
         if not fetched:
             await emit(events.progress("fetch", source=url, state="blocked"))
-            continue
+            return None
 
         await emit(events.log("Extraction started", url=url))
         text, used_fallback = extract_text(fetched["html"], url)
@@ -239,9 +435,9 @@ async def _work(req: GenerateRequest, emit):
 
         stripped = text.strip()
         if len(stripped) >= MIN_EXTRACTED_CHARS:
-            sources.append({"label": url, "text": text})
             await emit(events.progress("fetch", source=url, state="ready"))
-        elif stripped:
+            return {"label": url, "text": text, "html": fetched["html"]}
+        if stripped:
             await emit(
                 events.log(
                     "Extracted content too short, skipping source",
@@ -251,19 +447,43 @@ async def _work(req: GenerateRequest, emit):
                     min=MIN_EXTRACTED_CHARS,
                 )
             )
-            await emit(events.progress("fetch", source=url, state="blocked"))
         else:
             await emit(
-                events.log(
-                    "No usable text extracted", level="warn", url=url
-                )
+                events.log("No usable text extracted", level="warn", url=url)
             )
-            await emit(events.progress("fetch", source=url, state="blocked"))
+        await emit(events.progress("fetch", source=url, state="blocked"))
+        return None
+
+    # Step 2: process each seed URL.
+    for url in req.urls:
+        page = await _fetch_and_extract(url)
+        if page:
+            sources.append({"label": page["label"], "text": page["text"]})
+            fetched_pages.append(page)
 
     # Pasted text becomes its own source.
     if req.text and req.text.strip():
         sources.append({"label": "pasted-text", "text": req.text})
         await emit(events.progress("fetch", source="pasted-text", state="ready"))
+
+    # The original seed topic (computed BEFORE crawling, so it reflects only
+    # what the user provided) grounds both crawl relevance and the final
+    # relevance ranking in reduce.
+    seed_topic = _derive_seed_topic(sources) if sources else ""
+
+    # Step 2b: optionally crawl relevant links to gather more sources. Bounded
+    # and non-fatal — it only ever adds sources; depth 0 skips it entirely.
+    if req.crawl_depth > 0 and fetched_pages:
+        await emit(
+            events.log(
+                "Crawl started",
+                depth=req.crawl_depth,
+                seed_pages=len(fetched_pages),
+            )
+        )
+        await _crawl_links(
+            req, sources, fetched_pages, emit, _fetch_and_extract, seed_topic
+        )
 
     # Step 3: bail out if nothing usable.
     if not sources:
@@ -478,6 +698,11 @@ async def _work(req: GenerateRequest, emit):
     # Collect questions as chunks finish, but don't let one slow/stuck chunk
     # hold up the whole quiz: stop once we have enough (num_questions *
     # MAP_SUFFICIENCY) or the map deadline passes, then cancel the rest.
+    #
+    # When crawling, the sufficiency early-stop is DISABLED: every crawled page
+    # should contribute questions (reduce then dedupes and relevance-ranks),
+    # so we map all chunks and rely only on the deadline as a safety backstop.
+    crawl_active = req.crawl_depth > 0
     threshold = max(num_questions, math.ceil(num_questions * MAP_SUFFICIENCY))
     loop = asyncio.get_running_loop()
     deadline = loop.time() + MAP_DEADLINE_SECONDS
@@ -507,13 +732,13 @@ async def _work(req: GenerateRequest, emit):
                         "Chunk generation failed", level="warn", error=str(exc)
                     )
                 )
-        if len(pool) >= threshold:
+        if not crawl_active and len(pool) >= threshold:
             break
 
     if pending:
         reason = (
             "enough questions gathered"
-            if len(pool) >= threshold
+            if (not crawl_active and len(pool) >= threshold)
             else "map deadline reached"
         )
         await emit(
@@ -572,10 +797,22 @@ async def _work(req: GenerateRequest, emit):
     )
 
     selected_questions = None
-    if len(deduped) <= num_questions:
-        # Already at or under the target — no selection needed.
+    # When crawling, ALWAYS rank the pool by relevance to the seed topic — the
+    # user asked for relevance ranking, so it must not be gated by
+    # REDUCE_LLM_SELECTION_ENABLED (which only governs the non-crawl selector).
+    # Otherwise: run the selector only when over target and it's enabled.
+    use_selector = (crawl_active and bool(seed_topic) and len(deduped) > 0) or (
+        REDUCE_LLM_SELECTION_ENABLED and len(deduped) > num_questions
+    )
+    if not use_selector and len(deduped) <= num_questions:
+        # Already at or under the target and not ranking — no selection needed.
         selected_questions = deduped
-    elif REDUCE_LLM_SELECTION_ENABLED:
+    elif use_selector:
+        # When crawling, rank a larger pool by relevance to the seed topic, with
+        # more deadline headroom; otherwise the original source-balanced select.
+        reduce_deadline = (
+            CRAWL_REDUCE_DEADLINE_SECONDS if crawl_active else REDUCE_DEADLINE_SECONDS
+        )
         # A visible message (progress events carry no text) so the log doesn't
         # look frozen on "Heuristic dedupe" while the selector runs.
         await emit(
@@ -583,7 +820,8 @@ async def _work(req: GenerateRequest, emit):
                 "LLM selection started",
                 candidates=len(deduped),
                 target=num_questions,
-                deadline_s=REDUCE_DEADLINE_SECONDS,
+                deadline_s=reduce_deadline,
+                ranked_by_relevance=crawl_active,
             )
         )
         await emit(events.progress("reduce", step="selection"))
@@ -599,9 +837,13 @@ async def _work(req: GenerateRequest, emit):
         try:
             keep = await asyncio.wait_for(
                 llm.select_questions_llm(
-                    deduped, num_questions, emit, on_progress=_on_select_progress
+                    deduped,
+                    num_questions,
+                    emit,
+                    seed_topic=seed_topic if crawl_active else None,
+                    on_progress=_on_select_progress,
                 ),
-                timeout=REDUCE_DEADLINE_SECONDS,
+                timeout=reduce_deadline,
             )
         except Exception as exc:  # noqa: BLE001 - selector must never break reduce
             await emit(

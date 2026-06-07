@@ -54,7 +54,13 @@ export interface ChunkEvent {
   error?: string; // failed
 }
 
-export type PipelinePhase = "fetch" | "chunk" | "map" | "reduce" | "done";
+export type PipelinePhase =
+  | "fetch"
+  | "chunk"
+  | "map"
+  | "reduce"
+  | "crawl"
+  | "done";
 
 export interface ProgressEvent {
   type: "progress";
@@ -73,6 +79,11 @@ export interface ProgressEvent {
   removed?: number;
   remaining?: number;
   kept?: number;
+  // crawl
+  depth?: number;
+  max_depth?: number;
+  fetched?: number;
+  cap?: number;
 }
 
 export type StreamEvent = LogEvent | FinalEvent | ChunkEvent | ProgressEvent;
