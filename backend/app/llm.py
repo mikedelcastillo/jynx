@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import random
 import re
 
 import httpx
@@ -9,6 +10,8 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpe
 
 from . import config, events
 from .config import (
+    LLM_BACKOFF_BASE,
+    LLM_BACKOFF_CAP,
     LLM_CONNECT_TIMEOUT,
     LLM_FIRST_TOKEN_TIMEOUT,
     LLM_INTERTOKEN_TIMEOUT,
@@ -74,6 +77,17 @@ def _delta_reasoning(delta) -> str | None:
         extra = getattr(delta, "model_extra", None) or {}
         value = extra.get("reasoning") or extra.get("reasoning_content")
     return value
+
+
+def _retry_sleep(attempt: int) -> float:
+    """Full-jitter exponential backoff delay for retry `attempt` (0-based).
+
+    delay = random.uniform(0, min(LLM_BACKOFF_CAP, LLM_BACKOFF_BASE * 2**attempt)).
+    Full jitter de-synchronizes the concurrent chunks so they don't re-hit one
+    overloaded node in lockstep.
+    """
+    ceiling = min(LLM_BACKOFF_CAP, LLM_BACKOFF_BASE * (2 ** attempt))
+    return random.uniform(0, ceiling)
 
 
 _SYSTEM_PROMPT = """You generate multiple-choice quizzes from provided source material.
